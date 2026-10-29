@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="407" height="140" viewBox="0 0 407 140">
+<defs>
+    <linearGradient id="wmGrad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
+      <stop offset="0" stop-color="#FFE7A8"/>
+      <stop offset="0.45" stop-color="#FFC83C"/>
+      <stop offset="1" stop-color="#FF8C28"/>
+    </linearGradient>
+    <linearGradient id="wmfOuter" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#C2350E"/>
+      <stop offset="0.45" stop-color="#FF8C28"/>
+      <stop offset="1" stop-color="#FF5A1E"/>
+    </linearGradient>
+    <linearGradient id="wmfMid" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#FFB02E"/>
+      <stop offset="0.6" stop-color="#FFC83C"/>
+      <stop offset="1" stop-color="#FF9A2E"/>
+    </linearGradient>
+    <radialGradient id="wmfCore" cx="0.5" cy="0.72" r="0.62">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.45" stop-color="#FFF3D2"/>
+      <stop offset="1" stop-color="#FFE08A"/>
+    </radialGradient>
+    <linearGradient id="wmfBlue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3C8CFF" stop-opacity="0"/>
+      <stop offset="0.62" stop-color="#3C8CFF" stop-opacity="0"/>
+      <stop offset="0.88" stop-color="#3C8CFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#1F4FD8" stop-opacity="0.85"/>
+    </linearGradient>
+</defs>
+<g transform="translate(10.00,30.00) scale(1.0)"><g fill="url(#wmGrad)" stroke="url(#wmGrad)"><rect x="0.00" y="0.00" width="17.00" height="100.00"/><path d="M121.84,22.23 A41.50,41.50 0 1 0 132.50,50.00" fill="none" stroke-width="17.0" stroke-linecap="butt"/><rect x="93.00" y="41.50" width="48.00" height="17.00"/><rect x="124.00" y="41.50" width="17.00" height="22.00"/><rect x="165.00" y="0.00" width="17.00" height="100.00"/><rect x="230.00" y="0.00" width="17.00" height="100.00"/><polygon points="165.00,0 185.06,0 247.00,100 226.94,100"/><rect x="271.00" y="34.00" width="17.00" height="66.00"/><path d="M375.11,19.51 A29.00,20.75 0 1 0 349.50,50.00 L349.50,50.00 A29.00,20.75 0 1 1 323.89,80.49" fill="none" stroke-width="17.0" stroke-linecap="butt"/></g>
+    <path d="M281.60,-4.20 C284.60,4.80 295.10,10.20 295.10,22.80 C295.10,31.20 288.08,36.00 279.50,36.00 C270.92,36.00 263.90,31.20 263.90,22.80 C263.90,15.60 268.58,12.00 271.70,7.20 C272.32,12.00 276.38,13.80 277.63,10.80 C279.19,6.00 279.80,2.40 281.60,-4.20 Z" fill="url(#wmfOuter)"/>
+    <path d="M281.06,3.75 C283.28,10.41 291.05,14.41 291.05,23.73 C291.05,29.95 286.06,33.50 279.95,33.50 C273.84,33.50 268.85,29.95 268.85,23.73 C268.85,18.40 272.18,15.74 274.40,12.19 C274.84,15.74 277.73,17.07 278.62,14.85 C279.73,11.30 279.73,8.63 281.06,3.75 Z" fill="url(#wmfMid)"/>
+    <path d="M280.51,12.30 C281.89,16.44 286.45,18.92 286.45,24.72 C286.45,28.58 283.59,30.79 280.10,30.79 C276.61,30.79 273.75,28.58 273.75,24.72 C273.75,21.41 275.66,19.75 276.93,17.54 C277.18,19.75 278.83,20.58 279.34,19.20 C279.97,16.99 279.69,15.34 280.51,12.30 Z" fill="url(#wmfCore)"/></g>
+</svg>

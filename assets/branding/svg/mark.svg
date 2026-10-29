@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+<defs>
+    <linearGradient id="mkOuter" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#C2350E"/>
+      <stop offset="0.45" stop-color="#FF8C28"/>
+      <stop offset="1" stop-color="#FF5A1E"/>
+    </linearGradient>
+    <linearGradient id="mkMid" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#FFB02E"/>
+      <stop offset="0.6" stop-color="#FFC83C"/>
+      <stop offset="1" stop-color="#FF9A2E"/>
+    </linearGradient>
+    <radialGradient id="mkCore" cx="0.5" cy="0.72" r="0.62">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.45" stop-color="#FFF3D2"/>
+      <stop offset="1" stop-color="#FFE08A"/>
+    </radialGradient>
+    <linearGradient id="mkBlue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3C8CFF" stop-opacity="0"/>
+      <stop offset="0.62" stop-color="#3C8CFF" stop-opacity="0"/>
+      <stop offset="0.88" stop-color="#3C8CFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#1F4FD8" stop-opacity="0.85"/>
+    </linearGradient>
+</defs>
+
+    <path d="M277.00,54.00 C307.00,144.00 412.00,198.00 412.00,324.00 C412.00,408.00 341.80,456.00 256.00,456.00 C170.20,456.00 100.00,408.00 100.00,324.00 C100.00,252.00 146.80,216.00 178.00,168.00 C184.24,216.00 224.80,234.00 237.28,204.00 C252.88,156.00 259.00,120.00 277.00,54.00 Z" fill="url(#mkOuter)"/>
+    <path d="M271.60,133.50 C293.80,200.10 371.50,240.06 371.50,333.30 C371.50,395.46 321.55,430.98 260.50,430.98 C199.45,430.98 149.50,395.46 149.50,333.30 C149.50,280.02 182.80,253.38 205.00,217.86 C209.44,253.38 238.30,266.70 247.18,244.50 C258.28,208.98 258.28,182.34 271.60,133.50 Z" fill="url(#mkMid)"/>
+    <path d="M266.14,219.00 C279.94,260.40 325.48,285.24 325.48,343.20 C325.48,381.84 296.91,403.92 262.00,403.92 C227.09,403.92 198.52,381.84 198.52,343.20 C198.52,310.08 217.56,293.52 230.26,271.44 C232.80,293.52 249.30,301.80 254.38,288.00 C260.73,265.92 257.86,249.36 266.14,219.00 Z" fill="url(#mkCore)"/>
+    <path d="M266.14,219.00 C279.94,260.40 325.48,285.24 325.48,343.20 C325.48,381.84 296.91,403.92 262.00,403.92 C227.09,403.92 198.52,381.84 198.52,343.20 C198.52,310.08 217.56,293.52 230.26,271.44 C232.80,293.52 249.30,301.80 254.38,288.00 C260.73,265.92 257.86,249.36 266.14,219.00 Z" fill="url(#mkBlue)"/>
+</svg>

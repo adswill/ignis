@@ -1,0 +1,12 @@
+/target/
+/dist/
+/backups/
+/scratch/
+/old_cpu/
+*.ppm
+__pycache__/
+*.pyc
+.DS_Store
+*.dmg
+.claude/
+graphify-out/

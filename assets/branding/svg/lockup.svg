@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="571" height="180" viewBox="0 0 571 180">
+<defs>
+    <linearGradient id="lkOuter" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#C2350E"/>
+      <stop offset="0.45" stop-color="#FF8C28"/>
+      <stop offset="1" stop-color="#FF5A1E"/>
+    </linearGradient>
+    <linearGradient id="lkMid" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#FFB02E"/>
+      <stop offset="0.6" stop-color="#FFC83C"/>
+      <stop offset="1" stop-color="#FF9A2E"/>
+    </linearGradient>
+    <radialGradient id="lkCore" cx="0.5" cy="0.72" r="0.62">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.45" stop-color="#FFF3D2"/>
+      <stop offset="1" stop-color="#FFE08A"/>
+    </radialGradient>
+    <linearGradient id="lkBlue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3C8CFF" stop-opacity="0"/>
+      <stop offset="0.62" stop-color="#3C8CFF" stop-opacity="0"/>
+      <stop offset="0.88" stop-color="#3C8CFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#1F4FD8" stop-opacity="0.85"/>
+    </linearGradient>
+    <linearGradient id="wmGrad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
+      <stop offset="0" stop-color="#FFE7A8"/>
+      <stop offset="0.45" stop-color="#FFC83C"/>
+      <stop offset="1" stop-color="#FF8C28"/>
+    </linearGradient>
+    <linearGradient id="wmfOuter" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#C2350E"/>
+      <stop offset="0.45" stop-color="#FF8C28"/>
+      <stop offset="1" stop-color="#FF5A1E"/>
+    </linearGradient>
+    <linearGradient id="wmfMid" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#FFB02E"/>
+      <stop offset="0.6" stop-color="#FFC83C"/>
+      <stop offset="1" stop-color="#FF9A2E"/>
+    </linearGradient>
+    <radialGradient id="wmfCore" cx="0.5" cy="0.72" r="0.62">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.45" stop-color="#FFF3D2"/>
+      <stop offset="1" stop-color="#FFE08A"/>
+    </radialGradient>
+    <linearGradient id="wmfBlue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3C8CFF" stop-opacity="0"/>
+      <stop offset="0.62" stop-color="#3C8CFF" stop-opacity="0"/>
+      <stop offset="0.88" stop-color="#3C8CFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#1F4FD8" stop-opacity="0.85"/>
+    </linearGradient>
+</defs>
+
+    <path d="M87.35,9.30 C97.85,40.80 134.60,59.70 134.60,103.80 C134.60,133.20 110.03,150.00 80.00,150.00 C49.97,150.00 25.40,133.20 25.40,103.80 C25.40,78.60 41.78,66.00 52.70,49.20 C54.88,66.00 69.08,72.30 73.45,61.80 C78.91,45.00 81.05,32.40 87.35,9.30 Z" fill="url(#lkOuter)"/>
+    <path d="M85.46,37.12 C93.23,60.44 120.43,74.42 120.43,107.06 C120.43,128.81 102.94,141.24 81.58,141.24 C60.21,141.24 42.73,128.81 42.73,107.06 C42.73,88.41 54.38,79.08 62.15,66.65 C63.70,79.08 73.81,83.75 76.91,75.97 C80.80,63.54 80.80,54.22 85.46,37.12 Z" fill="url(#lkMid)"/>
+    <path d="M83.55,67.05 C88.38,81.54 104.32,90.23 104.32,110.52 C104.32,124.04 94.32,131.77 82.10,131.77 C69.88,131.77 59.88,124.04 59.88,110.52 C59.88,98.93 66.55,93.13 70.99,85.40 C71.88,93.13 77.66,96.03 79.43,91.20 C81.66,83.47 80.65,77.68 83.55,67.05 Z" fill="url(#lkCore)"/>
+    <path d="M83.55,67.05 C88.38,81.54 104.32,90.23 104.32,110.52 C104.32,124.04 94.32,131.77 82.10,131.77 C69.88,131.77 59.88,124.04 59.88,110.52 C59.88,98.93 66.55,93.13 70.99,85.40 C71.88,93.13 77.66,96.03 79.43,91.20 C81.66,83.47 80.65,77.68 83.55,67.05 Z" fill="url(#lkBlue)"/><g transform="translate(160.00,30.00) scale(1.0)"><g fill="url(#wmGrad)" stroke="url(#wmGrad)"><rect x="0.00" y="0.00" width="17.00" height="100.00"/><path d="M121.84,22.23 A41.50,41.50 0 1 0 132.50,50.00" fill="none" stroke-width="17.0" stroke-linecap="butt"/><rect x="93.00" y="41.50" width="48.00" height="17.00"/><rect x="124.00" y="41.50" width="17.00" height="22.00"/><rect x="165.00" y="0.00" width="17.00" height="100.00"/><rect x="230.00" y="0.00" width="17.00" height="100.00"/><polygon points="165.00,0 185.06,0 247.00,100 226.94,100"/><rect x="271.00" y="34.00" width="17.00" height="66.00"/><path d="M375.11,19.51 A29.00,20.75 0 1 0 349.50,50.00 L349.50,50.00 A29.00,20.75 0 1 1 323.89,80.49" fill="none" stroke-width="17.0" stroke-linecap="butt"/></g>
+    <path d="M281.60,-4.20 C284.60,4.80 295.10,10.20 295.10,22.80 C295.10,31.20 288.08,36.00 279.50,36.00 C270.92,36.00 263.90,31.20 263.90,22.80 C263.90,15.60 268.58,12.00 271.70,7.20 C272.32,12.00 276.38,13.80 277.63,10.80 C279.19,6.00 279.80,2.40 281.60,-4.20 Z" fill="url(#wmfOuter)"/>
+    <path d="M281.06,3.75 C283.28,10.41 291.05,14.41 291.05,23.73 C291.05,29.95 286.06,33.50 279.95,33.50 C273.84,33.50 268.85,29.95 268.85,23.73 C268.85,18.40 272.18,15.74 274.40,12.19 C274.84,15.74 277.73,17.07 278.62,14.85 C279.73,11.30 279.73,8.63 281.06,3.75 Z" fill="url(#wmfMid)"/>
+    <path d="M280.51,12.30 C281.89,16.44 286.45,18.92 286.45,24.72 C286.45,28.58 283.59,30.79 280.10,30.79 C276.61,30.79 273.75,28.58 273.75,24.72 C273.75,21.41 275.66,19.75 276.93,17.54 C277.18,19.75 278.83,20.58 279.34,19.20 C279.97,16.99 279.69,15.34 280.51,12.30 Z" fill="url(#wmfCore)"/></g><text x="162" y="160" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="17" letter-spacing="7.2" fill="#8C919E">COMBUSTION SANDBOX</text>
+</svg>
