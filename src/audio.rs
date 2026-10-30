@@ -3,13 +3,17 @@
 //! (virtual microphone + source models), see that module's header. API for the app:
 //!
 //!   let mut audio = Audio::new();                         // Option<Audio>; None = no device
-//!   // every frame, after GpuSim::frame has been submitted:
-//!   audio.feed(gpu_acoustics.take_frames());              // acoustic features read back from the GPU
-//!   audio.set_volume(v); audio.set_muted(m);              // master (settings)
+//!   let link = acoustics::Link::new(device, u0, meta, wall, W, H);  // once, after GpuSim::new (GpuSim::buffers())
+//!   //   gpu.rs calls link.pre / link.step / link.post through three hooks (see ARCHITECTURE.md "Acoustics integration")
+//!   // every app frame, before the paint callback:
+//!   link.set_frame(acoustics::Listener { pos: camera_centre_cells, cam, speed, real_dt, sim_time, paused, fan_pow });
+//!   // every app frame, after the previous frame was submitted:
+//!   audio.feed(link.take_frames());                       // acoustic features read back from the GPU (~2 frames late)
+//!   audio.set_volume(v); audio.set_muted(m);              // master (settings); link.set_enabled(!m) saves the GPU work
 //!   // optional fallback while the GPU features are unavailable (headless, old GPU path): the stats-driven synth
 //!   audio.update(&AudioSnapshot { .. });                  // is crossfaded in automatically when `feed` is idle
 //!
-//! The listener is the camera centre: pass it in `acoustics::FrameInfo::listener` to `GpuAcoustics::prepare`.
+//! The listener is the camera centre.
 //!
 //! Fallback (legacy) engine: procedural audio synthesised in real time on the cpal audio
 //! thread from a handful of parameters derived from simulation state. No samples.
@@ -89,8 +93,90 @@ impl Default for AudioSnapshot {
     }
 }
 
+/// Material class whose sound signature the stats-driven engine uses (crackle, hiss, chuffing, boom character).
+/// Pick with `Audio::set_signature` (the app can derive it from the dominant burning element / scene).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Signature {
+    /// wood / generic hydrocarbon fire (campfire)
+    #[default]
+    Generic,
+    /// black powder / gunpowder: fizz with sparse spits, then a dull whoomph
+    BlackPowder,
+    /// magnesium / flash powders: bright sizzle, very dense high-frequency ticks, hard bright flash
+    Magnesium,
+    /// thermite: steady low hiss and roar with rare spatter pops, no boom
+    Thermite,
+    /// TNT / high explosive: almost silent until a single very hard crack (short, bright, very loud)
+    Tnt,
+    /// cast propellant grain burn: steady roar, chuffing at low chamber pressure
+    GrainBurn,
+}
+
+impl Signature {
+    pub const ALL: [Signature; 6] = [Signature::Generic, Signature::BlackPowder, Signature::Magnesium, Signature::Thermite, Signature::Tnt, Signature::GrainBurn];
+    pub fn name(self) -> &'static str {
+        match self {
+            Signature::Generic => "wood fire",
+            Signature::BlackPowder => "black powder",
+            Signature::Magnesium => "magnesium",
+            Signature::Thermite => "thermite",
+            Signature::Tnt => "tnt",
+            Signature::GrainBurn => "grain burn",
+        }
+    }
+    fn params(self) -> SigParams {
+        let g = SigParams::default();
+        match self {
+            Signature::Generic => g,
+            // fizz: many short mid ticks, sparse spits; a little hiss
+            Signature::BlackPowder => SigParams { rate: 2.2, fc_lo: 1800.0, fc_hi: 4500.0, decay: 0.7, hiss: 0.5, pop: 0.3, low: 0.5, crack: 0.9, boom_body: 1.3, ..g },
+            // sizzle: very dense bright ticks, strong high hiss, almost no low body
+            Signature::Magnesium => SigParams { rate: 5.0, fc_lo: 4500.0, fc_hi: 9000.0, decay: 0.45, hiss: 1.6, pop: 0.05, low: 0.2, crack: 1.5, boom_body: 0.6, ..g },
+            // thermite: steady hiss + low roar, sparse spatter
+            Signature::Thermite => SigParams { rate: 0.5, fc_lo: 2500.0, fc_hi: 7000.0, decay: 1.2, hiss: 1.2, pop: 0.2, low: 1.3, crack: 0.5, boom_body: 0.5, ..g },
+            // TNT: nothing but the crack when it goes
+            Signature::Tnt => SigParams { rate: 0.1, fc_lo: 3000.0, fc_hi: 6000.0, decay: 0.5, hiss: 0.0, pop: 0.0, low: 0.2, crack: 2.4, boom_body: 0.7, ..g },
+            // grain: steady roar, chuffing when the chamber pressure is low
+            Signature::GrainBurn => SigParams { rate: 0.8, fc_lo: 1200.0, fc_hi: 3500.0, decay: 1.0, hiss: 0.7, pop: 0.1, low: 1.5, crack: 0.8, chuff_hz: 11.0, chuff_depth: 0.85, ..g },
+        }
+    }
+}
+
+/// Numerical form of a `Signature` (all multipliers; `SigParams::default()` = wood fire).
+#[derive(Clone, Copy)]
+struct SigParams {
+    /// crackle rate multiplier
+    rate: f32,
+    /// crackle centre frequency range at full heat, Hz
+    fc_lo: f32,
+    fc_hi: f32,
+    /// crackle decay multiplier
+    decay: f32,
+    /// steady high-frequency hiss level (x burn)
+    hiss: f32,
+    /// deep pop rate multiplier
+    pop: f32,
+    /// low-frequency body multiplier
+    low: f32,
+    /// initial blast crack multiplier
+    crack: f32,
+    /// blast body multiplier
+    boom_body: f32,
+    /// chuffing frequency (0 = none) and depth at low chamber pressure
+    chuff_hz: f32,
+    chuff_depth: f32,
+}
+
+impl Default for SigParams {
+    fn default() -> Self {
+        Self { rate: 1.0, fc_lo: 1200.0, fc_hi: 6700.0, decay: 1.0, hiss: 0.0, pop: 1.0, low: 1.0, crack: 1.0, boom_body: 1.0, chuff_hz: 0.0, chuff_depth: 0.0 }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct Targets {
+    /// 0..1: how close the chamber is to ambient (1 at <= 2 atm, 0 above 6 atm): drives chuffing
+    lowp: f32,
     fire: f32,
     heat: f32,
     roar: f32,
@@ -110,6 +196,7 @@ enum Event {
 struct Shared {
     t: Targets,
     events: Vec<Event>,
+    sig: SigParams,
 }
 
 pub struct Audio {
@@ -123,6 +210,9 @@ pub struct Audio {
     pub analyzer: Analyzer,
     /// frames fed (diagnostics)
     pub fed: u64,
+    sig: Signature,
+    /// booms still travelling to the listener: (seconds left, strength)
+    pending: Vec<(f32, f32)>,
 }
 
 /// Main thread -> audio thread messages of the acoustic path.
@@ -202,6 +292,7 @@ fn targets_from(s: &AudioSnapshot, master: f32) -> Targets {
     let roar = (1.0 - (-s.thrust_kn.max(0.0) / 12.0).exp()).clamp(0.0, 1.0);
     let active = if s.paused { 0.0 } else { s.sim_speed.clamp(0.0, 1.0).max(0.25) };
     Targets {
+        lowp: (1.0 - (s.max_p_atm - 2.0) / 4.0).clamp(0.0, 1.0),
         fire,
         heat,
         roar,
@@ -223,7 +314,7 @@ impl Audio {
         let config = sup.config();
         let sr = config.sample_rate;
         let ch = config.channels as usize;
-        let shared = Arc::new(Mutex::new(Shared { t: Targets { master: 1.0, ..Default::default() }, events: Vec::with_capacity(64) }));
+        let shared = Arc::new(Mutex::new(Shared { t: Targets { master: 1.0, ..Default::default() }, events: Vec::with_capacity(64), sig: SigParams::default() }));
         let (tx, rx) = mpsc::sync_channel::<Msg>(64);
         let stream = match fmt {
             cpal::SampleFormat::F32 => build::<f32>(&device, config, ch, sr, shared.clone(), rx),
@@ -233,7 +324,7 @@ impl Audio {
             _ => None,
         }?;
         stream.play().ok()?;
-        let mut a = Audio { _stream: stream, shared, tx, sample_rate: sr, volume: 0.8, muted: false, det: Detector::new(), analyzer: Analyzer::new(), fed: 0 };
+        let mut a = Audio { _stream: stream, shared, tx, sample_rate: sr, volume: 0.8, muted: false, det: Detector::new(), analyzer: Analyzer::new(), fed: 0, sig: Signature::Generic, pending: Vec::new() };
         a.push_master();
         Some(a)
     }
@@ -252,13 +343,51 @@ impl Audio {
     pub fn update(&mut self, snap: &AudioSnapshot) {
         let mut ev = Vec::new();
         self.det.step(snap, &mut ev);
+        if !snap.paused {
+            // sound travels at 347 m/s: only count down in game time
+            let dt = snap.dt.clamp(0.0, 0.1) * snap.sim_speed.max(0.0);
+            self.pending.retain_mut(|(t, s)| {
+                *t -= dt;
+                if *t <= 0.0 {
+                    ev.push(Event::Boom { strength: *s });
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         let t = targets_from(snap, 1.0);
         if let Ok(mut sh) = self.shared.lock() {
             sh.t = t;
+            sh.sig = self.sig.params();
             if sh.events.len() < 64 {
                 sh.events.extend(ev);
             }
         }
+    }
+
+    /// Material sound signature of the stats-driven engine (crackle / hiss / chuff / blast character).
+    pub fn set_signature(&mut self, sig: Signature) {
+        self.sig = sig;
+    }
+    pub fn signature(&self) -> Signature {
+        self.sig
+    }
+    /// Explosion `distance_m` metres from the listener: the report arrives after distance / 347 m/s of game time
+    /// and is quieter with distance (inverse law, 1 m reference scaled so 30 m is about 1/3).
+    pub fn boom_at(&mut self, strength: f32, distance_m: f32) {
+        let d = distance_m.max(0.0);
+        let s = (strength / (1.0 + d / 15.0)).clamp(0.05, 3.0);
+        if d < 1.0 {
+            self.boom(s);
+        } else {
+            self.pending.push((d / 347.0, s));
+        }
+    }
+    /// Flip the mute (hotkey M). Returns the new state. The app stores it in `Settings::muted`.
+    pub fn toggle_muted(&mut self) -> bool {
+        self.set_muted(!self.muted);
+        self.muted
     }
 
     /// Fire an explosion directly in the fallback engine (strength ~0.2 small pop .. 3 huge).
@@ -316,6 +445,7 @@ where
             move |data: &mut [T], _| {
                 if let Ok(mut sh) = shared.try_lock() {
                     eng.target = sh.t;
+                    eng.sig = sh.sig;
                     local_ev.extend(sh.events.drain(..));
                 }
                 for e in local_ev.drain(..) {
@@ -654,6 +784,12 @@ struct Engine {
     c_sz: SvfCoef,
     flk: f32,
     trb: f32,
+    sig: SigParams,
+    chuff_ph: f32,
+    chuff: f32,
+    hiss_l: Svf,
+    hiss_r: Svf,
+    c_hiss: SvfCoef,
     // output
     rev: Reverb,
     lim_env: f32,
@@ -717,6 +853,12 @@ impl Engine {
             c_sz: SvfCoef::new(6000.0, 1.4, sr),
             flk: 0.5,
             trb: 0.5,
+            sig: SigParams::default(),
+            chuff_ph: 0.0,
+            chuff: 1.0,
+            hiss_l: Svf::default(),
+            hiss_r: Svf::default(),
+            c_hiss: SvfCoef::new(5000.0, 0.6, sr),
             rev: Reverb::new(sr),
             lim_env: 0.0,
             lim_g: 1.0,
@@ -856,20 +998,35 @@ impl Engine {
         let dt = n / sr;
         let act = c.active;
         // fire crackles: rate rises steeply with burn rate
-        let rate = (3.0 + 70.0 * c.fire) * c.fire.sqrt() * act;
-        if self.rng.u() < rate * dt {
+        let sg = self.sig;
+        let rate = (3.0 + 70.0 * c.fire) * c.fire.sqrt() * act * sg.rate;
+        // dense crackle needs several bursts per control tick
+        let mut nb = (rate * dt).floor();
+        if self.rng.u() < rate * dt - nb {
+            nb += 1.0;
+        }
+        for _ in 0..(nb as u32).min(4) {
             let big = self.rng.u().powi(4);
-            let fc = 1200.0 + self.rng.u() * 5500.0 * (0.5 + 0.5 * c.heat);
+            let fc = sg.fc_lo + self.rng.u() * (sg.fc_hi - sg.fc_lo) * (0.5 + 0.5 * c.heat);
             let amp = (0.08 + 0.55 * big) * (0.4 + 0.6 * c.fire);
-            let (q, d) = (1.2 + self.rng.u() * 3.0, 0.0015 + 0.006 * self.rng.u());
+            let (q, d) = (1.2 + self.rng.u() * 3.0, (0.0015 + 0.006 * self.rng.u()) * sg.decay);
             self.spawn_burst(fc, q, d, amp, 1.4);
         }
         // occasional deeper pops (resin/gas pockets)
-        if self.rng.u() < (0.8 + 5.0 * c.fire) * c.fire * act * dt {
+        if self.rng.u() < (0.8 + 5.0 * c.fire) * c.fire * act * dt * sg.pop {
             let fc = 250.0 + self.rng.u() * 600.0;
             let d = 0.012 + 0.02 * self.rng.u();
             self.spawn_burst(fc, 0.9, d, 0.35 * (0.3 + c.fire), 1.0);
         }
+        // chuffing: low-pressure combustion instability (L* mode), amplitude pulsing at ~chuff_hz
+        if sg.chuff_hz > 0.0 {
+            self.chuff_ph = (self.chuff_ph + sg.chuff_hz * (0.8 + 0.4 * self.rng.u()) * dt).fract();
+            let pulse = 0.5 + 0.5 * (self.chuff_ph * 2.0 * PI).sin();
+            self.chuff = 1.0 - sg.chuff_depth * c.lowp * (1.0 - pulse.powi(2));
+        } else {
+            self.chuff = 1.0;
+        }
+        self.c_hiss = SvfCoef::new(sg.fc_lo + 0.5 * (sg.fc_hi - sg.fc_lo), 0.6, sr);
         // supersonic jet crackle (shock-associated), only at high thrust
         let jr = ((r - 0.35) / 0.65).clamp(0.0, 1.0);
         if self.rng.u() < 90.0 * jr * jr * act * dt {
@@ -937,10 +1094,17 @@ impl Engine {
             let (lp, _, _) = self.fire_lp.run(bm, &self.c_fire_lp);
             let (_, bpl, _) = self.fire_bp_l.run(pl, &self.c_fire_bp);
             let (_, bpr, _) = self.fire_bp_r.run(pr, &self.c_fire_bp);
-            let a = c.fire.sqrt() * gust;
-            let low = lp * 0.55 * a;
+            let a = c.fire.sqrt() * gust * self.chuff;
+            let low = lp * 0.55 * a * self.sig.low;
             l += low + bpl * 0.22 * a * (0.5 + c.heat);
             r += low + bpr * 0.22 * a * (0.5 + c.heat);
+            if self.sig.hiss > 0.0 {
+                let (_, _, hl) = self.hiss_l.run(wl, &self.c_hiss);
+                let (_, _, hr) = self.hiss_r.run(wr, &self.c_hiss);
+                let h = 0.05 * self.sig.hiss * c.fire * gust * self.chuff;
+                l += hl * h;
+                r += hr * h;
+            }
         }
 
         // ---- rocket / jet roar
@@ -953,7 +1117,7 @@ impl Engine {
             let (_, mr, _) = self.mid_r.run(pr, &self.c_mid);
             let (_, _, hl) = self.hs_l.run(wl, &self.c_hs);
             let (_, _, hr) = self.hs_r.run(wr, &self.c_hs);
-            let g = c.roar;
+            let g = c.roar * (0.4 + 0.6 * self.chuff);
             let low = soft(rum * 1.6 * g) * 0.55 + rum2 * 0.35 * g;
             let mid = 0.30 * g * am;
             let hi = 0.07 * g.powf(1.6) * am;
@@ -1024,7 +1188,7 @@ impl Engine {
             let tt = b.t;
             let s = b.s;
             // initial crack: very short bright noise (N-wave front)
-            let crack = rng.w() * (-tt / 0.006).exp() * (0.6 + 0.4 * s.min(2.0));
+            let crack = rng.w() * (-tt / 0.006).exp() * (0.6 + 0.4 * s.min(2.0)) * self.sig.crack;
             // thump: pitch-falling sine, the "chest hit"
             let f = 32.0 + 85.0 * (-tt / (0.05 + 0.02 * s)).exp();
             b.phase += 2.0 * PI * f / sr;
@@ -1038,7 +1202,7 @@ impl Engine {
             let cb = SvfCoef::new(fc, 0.7, sr);
             let wn = rng.w();
             let (body, _, _) = b.body.run(b.brown.run(wn) * 0.5 + wn * 0.5, &cb);
-            let body = body * (-tt / (0.35 + 0.4 * s)).exp() * atk * (0.7 + 0.4 * s.min(2.0));
+            let body = body * (-tt / (0.35 + 0.4 * s)).exp() * atk * (0.7 + 0.4 * s.min(2.0)) * self.sig.boom_body;
             // rolling rumble tail (reflections, thunder-like)
             let roll = b.roll.run(rng, 4.0, sr);
             let ct = SvfCoef::new(90.0 + 60.0 * roll, 0.8, sr);
@@ -1265,6 +1429,117 @@ pub fn render_offline(secs: f32, sr: u32) -> Vec<f32> {
     out
 }
 
+/// Named review scenes: (name, signature, seconds). Scripted from the same quantities the app feeds.
+pub const REVIEW_SCENES: [(&str, Signature, f32); 8] = [
+    ("campfire", Signature::Generic, 8.0),
+    ("rocket", Signature::Generic, 8.0),
+    ("blackpowder", Signature::BlackPowder, 6.0),
+    ("magnesium", Signature::Magnesium, 5.0),
+    ("thermite", Signature::Thermite, 7.0),
+    ("tnt", Signature::Tnt, 5.0),
+    ("graincast", Signature::GrainBurn, 9.0),
+    ("explosion_far", Signature::Generic, 5.0),
+];
+
+/// (snapshot, booms to fire this frame as (strength, distance_m))
+fn review_snapshot(name: &str, t: f32, dt: f32) -> AudioSnapshot {
+    let mut s = AudioSnapshot { dt, walls: 5000, ..Default::default() };
+    let ramp = |t0: f32, rate: f32, max: f32| if t > t0 { ((t - t0) * rate).min(max) } else { 0.0 };
+    match name {
+        "campfire" => {
+            s.burn_kgs = ramp(0.5, 1.0, 1.2) * (0.85 + 0.15 * (t * 2.3).sin());
+            s.max_t_k = 900.0 + 400.0 * (s.burn_kgs / 1.2);
+        }
+        "rocket" => {
+            // ignition at 1 s, thrust to 35 kN, chamber 30 atm; shut-down tail at 6.5 s
+            let on = if t < 6.5 { ramp(1.0, 14.0, 35.0) } else { (35.0 - (t - 6.5) * 40.0).max(0.0) };
+            s.thrust_kn = on;
+            s.burn_kgs = on / 8.0;
+            s.max_t_k = 300.0 + on * 85.0;
+            s.max_p_atm = 1.0 + on * 0.8;
+            s.inlet = if t > 0.5 { 0.7 } else { 0.0 };
+        }
+        "blackpowder" => {
+            s.burn_kgs = if (0.5..3.5).contains(&t) { 2.0 } else { 0.0 };
+            s.max_t_k = 300.0 + s.burn_kgs * 600.0;
+        }
+        "magnesium" => {
+            s.burn_kgs = if (0.5..3.0).contains(&t) { 3.0 } else { 0.0 };
+            s.max_t_k = 300.0 + s.burn_kgs * 900.0;
+        }
+        "thermite" => {
+            s.burn_kgs = ramp(0.5, 2.0, 1.5);
+            s.max_t_k = 300.0 + s.burn_kgs * 1800.0;
+        }
+        "graincast" => {
+            // 0-4.5 s: low chamber pressure (chuffs); then pressure rises and it settles to a steady roar
+            let p = if t < 4.5 { 1.4 } else { (1.4 + (t - 4.5) * 4.0).min(12.0) };
+            s.max_p_atm = p;
+            s.burn_kgs = ramp(0.5, 2.0, 2.5);
+            s.thrust_kn = ramp(0.5, 3.0, 10.0);
+            s.max_t_k = 300.0 + s.burn_kgs * 800.0;
+        }
+        _ => {}
+    }
+    s
+}
+
+fn review_booms(name: &str, t0: f32, t1: f32) -> Vec<(f32, f32)> {
+    let ev: &[(f32, f32, f32)] = match name {
+        "blackpowder" => &[(3.5, 1.2, 0.0)],
+        "magnesium" => &[(3.0, 0.8, 0.0)],
+        "tnt" => &[(1.0, 2.0, 0.0)],
+        "explosion_far" => &[(0.5, 1.5, 0.0), (2.0, 1.5, 200.0)],
+        "rocket" => &[],
+        _ => &[],
+    };
+    ev.iter().filter(|e| e.0 >= t0 && e.0 < t1).map(|e| (e.1, e.2)).collect()
+}
+
+/// Render one review scene offline (stereo interleaved). Booms arrive after distance / 347 m/s.
+pub fn render_review(name: &str, sig: Signature, secs: f32, sr: u32) -> Vec<f32> {
+    let mut eng = Engine::new(sr as f32);
+    eng.sig = sig.params();
+    let mut det = Detector::new();
+    let fps = 60.0;
+    let spf = (sr as f32 / fps) as usize;
+    let frames = (secs * fps) as usize;
+    let mut out = Vec::with_capacity(frames * spf * 2);
+    let mut pending: Vec<(f32, f32)> = Vec::new();
+    let mut master = Bus::new(sr as f32);
+    master.wet = BUS_WET;
+    for f in 0..frames {
+        let t = f as f32 / fps;
+        let s = review_snapshot(name, t, 1.0 / fps);
+        let mut ev = Vec::new();
+        det.step(&s, &mut ev);
+        for (st, d) in review_booms(name, t, t + 1.0 / fps) {
+            let g = st / (1.0 + d / 15.0);
+            pending.push((d / 347.0, g));
+        }
+        pending.retain_mut(|(w, g)| {
+            *w -= 1.0 / fps;
+            if *w <= 0.0 {
+                ev.push(Event::Boom { strength: *g });
+                false
+            } else {
+                true
+            }
+        });
+        eng.target = targets_from(&s, 0.8);
+        for e in ev {
+            eng.trigger(e);
+        }
+        for _ in 0..spf {
+            let (l, r) = eng.next_dry();
+            let (l, r) = master.process([l * 0.8, r * 0.8]);
+            out.push(l);
+            out.push(r);
+        }
+    }
+    out
+}
+
 fn write_wav(path: &str, data: &[f32], sr: u32) -> std::io::Result<()> {
     use std::io::Write;
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
@@ -1313,6 +1588,25 @@ pub fn demo_cli() {
         match write_wav(&p, &buf, sr) {
             Ok(()) => println!("wrote {p}"),
             Err(e) => println!("wav write failed: {e}"),
+        }
+    }
+    if let Ok(dir) = std::env::var("AUDIO_SCENES_DIR") {
+        let _ = std::fs::create_dir_all(&dir);
+        for (name, sig, secs) in REVIEW_SCENES {
+            let b = render_review(name, sig, secs, sr);
+            let mut pk = 0.0f32;
+            let mut ss = 0.0f64;
+            let mut bad = 0;
+            for &v in &b {
+                if !v.is_finite() {
+                    bad += 1;
+                }
+                pk = pk.max(v.abs());
+                ss += (v as f64) * (v as f64);
+            }
+            let path = format!("{dir}/{name}.wav");
+            let _ = write_wav(&path, &b, sr);
+            println!("{name:14} sig={:12} peak={pk:.3} rms={:.4} nonfinite={bad} -> {path}", sig.name(), (ss / b.len().max(1) as f64).sqrt());
         }
     }
     if std::env::var("AUDIO_NO_DEVICE").is_ok() {

@@ -51,7 +51,7 @@ const CVS = vec4<f32>(5.827, 2.258, 2.580, 4.446);
 fn cid(x: i32, y: i32) -> u32 {
     return u32(clamp(y, 0, i32(P.h) - 1)) * P.w + u32(clamp(x, 0, i32(P.w) - 1));
 }
-fn solid_t(t: u32) -> bool { return t == 1u || t == 6u || t == 8u; }
+fn solid_t(t: u32) -> bool { return t == 1u || t == 6u || t == 8u || t == 9u || t == 10u || t == 12u || t == 13u; }
 fn fancy() -> bool { return P.view == 0u || P.view == 6u; }
 
 // Flame-emitter colour of a burning condensed element (atomic/molecular band emission and incandescent oxide
@@ -293,12 +293,14 @@ fn fx(@builtin(global_invocation_id) g: vec3<u32>) {
         liquid = select(0.0, 1.0, kind == 4u);
     } else if (t == 6u) {
         kind = 5u;
-    } else if (t == 2u) { kind = 6u; }
+    } else if (t == 9u || t == 10u || t == 12u || t == 13u) { kind = 1u; }
+    else if (t == 14u || t == 15u) { kind = 6u; }
+    else if (t == 2u) { kind = 6u; }
     else if (t == 3u) { kind = 7u; }
     else if (t == 4u) { kind = 8u; }
     else if (t == 7u) { kind = 9u; }
     else if (t == 5u) { kind = 10u + min((m >> 16u) & 0xFFu, 3u); }
-    let code = f32(kind + 16u * min(mat, 127u));
+    let code = f32(kind + 16u * select(min(mat, 127u), 0u, t >= 9u));
     var salb = vec3<f32>(0.0);
     if (solid) { salb = base.rgb; semi = em.rgb; }
     if (!fancy()) { semi = vec3<f32>(0.0); }

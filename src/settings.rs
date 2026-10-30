@@ -70,7 +70,7 @@ impl Quality {
                 render_scale: 0.75,
                 heat_haze: false,
                 fx_detail: false,
-                max_steps_per_frame: 16,
+                max_steps_per_frame: 24,
             },
             Quality::Medium => GraphicsKnobs {
                 particle_fraction: 0.5,
@@ -79,7 +79,7 @@ impl Quality {
                 render_scale: 1.0,
                 heat_haze: false,
                 fx_detail: true,
-                max_steps_per_frame: 32,
+                max_steps_per_frame: 64,
             },
             Quality::High | Quality::Custom => GraphicsKnobs {
                 particle_fraction: 0.8,
@@ -88,7 +88,7 @@ impl Quality {
                 render_scale: 1.0,
                 heat_haze: true,
                 fx_detail: true,
-                max_steps_per_frame: 48,
+                max_steps_per_frame: 128,
             },
             Quality::Ultra => GraphicsKnobs {
                 particle_fraction: 1.0,
@@ -97,7 +97,7 @@ impl Quality {
                 render_scale: 1.5,
                 heat_haze: true,
                 fx_detail: true,
-                max_steps_per_frame: 64,
+                max_steps_per_frame: 192,
             },
         }
     }
@@ -118,7 +118,7 @@ pub struct GraphicsKnobs {
     pub heat_haze: bool,
     /// Advected detail textures in fx.wgsl (flame / smoke micro-structure).
     pub fx_detail: bool,
-    /// Upper bound for sim steps per rendered frame (app's MAX_STEPS is 64). Lower = the sim slows
+    /// Upper bound for sim steps per rendered frame (app MAX_STEPS is 192). Lower = the sim slows
     /// down instead of the frame rate when the GPU is busy.
     pub max_steps_per_frame: u32,
 }
@@ -127,7 +127,7 @@ impl GraphicsKnobs {
     fn clamp(mut self) -> Self {
         self.particle_fraction = self.particle_fraction.clamp(0.0, 1.0);
         self.render_scale = self.render_scale.clamp(0.5, 2.0);
-        self.max_steps_per_frame = self.max_steps_per_frame.clamp(1, 64);
+        self.max_steps_per_frame = self.max_steps_per_frame.clamp(1, 192);
         self
     }
 }
@@ -493,6 +493,8 @@ actions! {
     Pause        = ("pause", "Pause / resume", "Simulation", [C::plain(Space)]),
     Step         = ("step", "Step one frame", "Simulation", [C::plain(Period)]),
     StartTest    = ("start_test", "Start mission test", "Simulation", [C::plain(Enter)]),
+    SpeedSlower  = ("speed_slower", "Slower time scale", "Simulation", [C::plain(Minus)]),
+    SpeedFaster  = ("speed_faster", "Faster time scale", "Simulation", [C::plain(Equals)]),
     ToggleIgniters = ("toggle_igniters", "Igniters on / off", "Simulation", [C::plain(I)]),
     View1        = ("view_1", "View 1: Render", "Views", [C::plain(Num1)]),
     View2        = ("view_2", "View 2: Pressure", "Views", [C::plain(Num2)]),
@@ -528,6 +530,7 @@ actions! {
     Fav8         = ("fav_8", "Favourite 8", "Favourites", [C::shift(Num8)]),
     Fav9         = ("fav_9", "Favourite 9", "Favourites", [C::shift(Num9)]),
     Drawer       = ("drawer", "Toggle side drawer", "Interface", [C::plain(Tab)]),
+    Mute         = ("mute", "Sound on / off", "Interface", [C::shift(M)]),
     Help         = ("help", "Help", "Interface", [C::plain(H), C::plain(F1)]),
     Undo         = ("undo", "Undo", "File", [C::cmd(Z)]),
     Redo         = ("redo", "Redo", "File", [C::cmd_shift(Z)]),
@@ -987,8 +990,16 @@ impl Settings {
 
 /// `~/Library/Application Support/Ignis`
 pub fn data_dir() -> Option<PathBuf> {
+    app_support().map(|d| d.join("Ignis"))
+}
+
+/// Per-user application data folder: %APPDATA% on Windows, ~/Library/Application Support elsewhere.
+pub fn app_support() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return std::env::var_os("APPDATA").map(PathBuf::from);
+    }
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/Ignis"))
+    Some(PathBuf::from(home).join("Library/Application Support"))
 }
 
 pub fn settings_path() -> Option<PathBuf> {
@@ -996,8 +1007,7 @@ pub fn settings_path() -> Option<PathBuf> {
 }
 
 fn legacy_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/Combustor/settings.txt"))
+    app_support().map(|d| d.join("Combustor/settings.txt"))
 }
 
 /// Load settings (falls back to the legacy file, then defaults). Never fails.
@@ -1482,7 +1492,7 @@ fn graphics_tab(ui: &mut egui::Ui, s: &mut Settings) -> bool {
         ui.checkbox(&mut k.fx_detail, "Advected flame / smoke texture");
         ui.end_row();
         ui.label("Sim speed cap");
-        ui.add(egui::Slider::new(&mut k.max_steps_per_frame, 4..=64).suffix(" steps/frame"));
+        ui.add(egui::Slider::new(&mut k.max_steps_per_frame, 4..=192).suffix(" steps/frame"));
         ui.end_row();
     });
     if k != before {

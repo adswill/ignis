@@ -63,8 +63,8 @@
 //!
 //! Loudness: every layer is computed as a physical sound pressure (Pa) at the listener (spherical spreading from
 //! the source centroid, near-field softened by source size, ISO-9613-like air absorption low-pass). Real levels
-//! span 40-200 dB SPL, so the output uses a documented compressive mapping (`loud`: 0.22 dB of output per dB SPL
-//! up to 130 dB, 0.10 above; 75 dB flare ~ -31 dBFS, 160 dB rocket ~ -16 dBFS rms; transients above the
+//! span 40-200 dB SPL, so the output uses a documented compressive mapping (`loud`: 0.17 dB of output per dB SPL
+//! up to 130 dB, 0.10 above; 75 dB flare ~ -28 dBFS, 160 dB rocket ~ -16 dBFS rms; transients above the
 //! continuous sound 0.25 dB/dB on top) applied as ONE gain to the total sound, so simultaneous sources keep their
 //! physical balance and spectra; a 1 ms lookahead limiter and a transparent clipper protect the output.
 //!
@@ -559,6 +559,102 @@ impl GpuAcoustics {
         let mut v: Vec<FeatureFrame> = self.ready.drain(..).collect();
         v.sort_by(|a, b| a.info.sim_time.partial_cmp(&b.info.sim_time).unwrap_or(std::cmp::Ordering::Equal));
         v
+    }
+}
+
+// ================================================================================================ app link
+
+/// Per-frame context the app knows and the solver does not (`Link::set_frame`).
+#[derive(Clone, Copy, Debug)]
+pub struct Listener {
+    /// listener position in cells (camera centre)
+    pub pos: [f32; 2],
+    /// visible region x, y, w, h in cells
+    pub cam: [f32; 4],
+    /// sim speed multiplier (1 = normal)
+    pub speed: f32,
+    /// real seconds of this frame
+    pub real_dt: f32,
+    /// sim time in tu at the end of the frame
+    pub sim_time: f32,
+    pub paused: bool,
+    pub fan_pow: f32,
+}
+
+struct LinkInner {
+    gpu: GpuAcoustics,
+    ctx: Listener,
+    enabled: bool,
+}
+
+/// The whole GPU side of the acoustics behind one clonable handle, so gpu.rs needs only three hook calls and
+/// no knowledge of this module (see ARCHITECTURE.md, "Acoustics integration"):
+///   * `pre`  at the start of `GpuSim::frame` (writes the listener uniform),
+///   * `step` inside the sim compute pass after every complete step (microphone sample),
+///   * `post` after the vis pass (feature reduction + asynchronous readback),
+/// and the app calls `set_frame` once per frame and `take_frames` -> `Audio::feed`.
+#[derive(Clone)]
+pub struct Link {
+    inner: Arc<std::sync::Mutex<LinkInner>>,
+}
+
+impl Link {
+    /// `u0`, `meta`, `wall`: the solver's gas state, tile layout and wall/matter buffers (`GpuSim::buffers()`).
+    pub fn new(device: &wgpu::Device, u0: &wgpu::Buffer, meta: &wgpu::Buffer, wall: &wgpu::Buffer, w: u32, h: u32) -> Link {
+        let gpu = GpuAcoustics::new(device, u0, meta, wall, w, h);
+        let ctx = Listener { pos: [w as f32 * 0.5, h as f32 * 0.5], cam: [0.0, 0.0, w as f32, h as f32], speed: 1.0, real_dt: 1.0 / 60.0, sim_time: 0.0, paused: false, fan_pow: 1.0 };
+        Link { inner: Arc::new(std::sync::Mutex::new(LinkInner { gpu, ctx, enabled: true })) }
+    }
+
+    /// Once per app frame, before the paint callback runs.
+    pub fn set_frame(&self, l: Listener) {
+        if let Ok(mut s) = self.inner.lock() {
+            s.ctx = l;
+        }
+    }
+
+    /// Skip all GPU work (muted / no audio device). Pending readbacks are still drained.
+    pub fn set_enabled(&self, on: bool) {
+        if let Ok(mut s) = self.inner.lock() {
+            s.enabled = on;
+        }
+    }
+
+    /// Hook 1: start of `GpuSim::frame`. `steps` = sim steps encoded this frame, `reset` = scene load / gas reset.
+    pub fn pre(&self, queue: &wgpu::Queue, steps: u32, reset: bool) {
+        if let Ok(mut s) = self.inner.lock() {
+            if !s.enabled {
+                return;
+            }
+            let c = s.ctx;
+            let info = FrameInfo { steps, sim_time: c.sim_time, real_dt: c.real_dt, speed: c.speed, listener: c.pos, cam: c.cam, fan_pow: c.fan_pow, paused: c.paused || steps == 0, reset };
+            s.gpu.prepare(queue, &info);
+        }
+    }
+
+    /// Hook 2: inside the sim compute pass, after each complete step. Re-binds `restore` (the sim bind group).
+    pub fn step(&self, pass: &mut wgpu::ComputePass<'_>, restore: &wgpu::BindGroup) {
+        if let Ok(mut s) = self.inner.lock() {
+            if s.enabled {
+                s.gpu.encode_mic(pass, restore);
+            }
+        }
+    }
+
+    /// Hook 3: after the sim and vis passes of the frame (no compute pass may be open on `enc`).
+    pub fn post(&self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder) {
+        if let Ok(mut s) = self.inner.lock() {
+            if s.enabled {
+                s.gpu.encode_frame(device, enc);
+            } else {
+                s.gpu.harvest(device);
+            }
+        }
+    }
+
+    /// Read-back feature frames, oldest first -> `Audio::feed`.
+    pub fn take_frames(&self) -> Vec<FeatureFrame> {
+        self.inner.lock().map(|mut s| s.gpu.take_frames()).unwrap_or_default()
     }
 }
 
@@ -1060,7 +1156,7 @@ const MIC_GATE_S: f32 = 1.5;
 /// fraction of the dynamic pressure heard as wind buffeting at the ear
 const WIND_FRACTION: f32 = 0.003;
 /// flow speed (m/s) below which the listener feels no wind
-const WIND_MIN_MS: f32 = 120.0;
+const WIND_MIN_MS: f32 = 260.0;
 
 /// dB SPL of an rms pressure (Pa)
 pub fn spl(p: f32) -> f32 {
@@ -1068,7 +1164,7 @@ pub fn spl(p: f32) -> f32 {
 }
 
 /// Loudness mapping (documented in the header): output level (dBFS rms per channel at centre pan) vs SPL of
-/// the total continuous sound: 0.22 dB per dB up to 130 dB SPL (75 dB -> -31 dBFS, 100 dB -> -25.6, 130 dB ->
+/// the total continuous sound: 0.17 dB per dB up to 130 dB SPL (75 dB -> -28.4 dBFS, 100 dB -> -24.1, 130 dB ->
 /// -19), 0.10 dB per dB above (160 dB -> -16, 170 dB -> -15): loud jets and rockets keep ~15-20 dB of headroom
 /// for their crackle and the limiter stays out of their crest factor. Applied to the TOTAL pressure (see
 /// `Synth::push`): every layer gets the same gain `loud(P)/P`, so the balance between simultaneous sources and
@@ -1095,7 +1191,7 @@ fn loud_ev_ratio(p: f32, p_ref: f32) -> f32 {
 }
 const LOUD_KNEE: f32 = 130.0;
 const LOUD_AT_KNEE: f32 = -19.0;
-const LOUD_K_LO: f32 = 0.22;
+const LOUD_K_LO: f32 = 0.17;
 const LOUD_K_HI: f32 = 0.10;
 const LOUD_K_EV: f32 = 0.25;
 /// gain of the loudness mapping at total pressure p (Pa -> output units), finite at p = 0

@@ -13,6 +13,11 @@ pub const H: u32 = 288;
 pub const GRAVITY: f32 = 0.0015;
 /// Fixed simulation time step (CFL-safe: speed is capped in the shader).
 pub const DT: f32 = 0.028;
+/// Adaptive time step (sim.wgsl `act`): dt = clamp(CFL / (max(|u|,|v|) + c), DT, DT_MAX), chosen on the GPU every step from
+/// the previous step's wave speed. DT is the floor, so fast/hot scenes (rocket, blasts) run exactly as before and only
+/// calm scenes take larger steps.
+pub const DT_MAX: f32 = 0.06;
+pub const CFL_TARGET: f32 = 0.4;
 pub const MAX_OPS: usize = 256;
 /// Wall heat/damage passes run every N gas steps (with an N times larger step).
 const WALL_EVERY: u32 = 4;
@@ -21,7 +26,9 @@ const RK_TX: u32 = 16;
 const RK_TY: u32 = 8;
 const N_TILES: u32 = W.div_ceil(RK_TX) * H.div_ceil(RK_TY);
 /// AUX layout (sim.wgsl): calm flags at 0, active flags at 8192, solid bits at 16384 (u32 words)
-const AUX_WORDS: u64 = 3 * 8192;
+const AUX_WORDS: u64 = 4 * 8192;
+/// Word offset of the reciprocating-engine state/config block in AUX (engine.wgsl)
+pub const ENG_WORD: u64 = 24576;
 const AUX_CALM_BYTES: u64 = ((N_TILES as u64 * 4) + 3) / 4 * 4;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -43,6 +50,10 @@ struct Params {
     p_air: f32,
     cam: [f32; 4],
     _p2: [f32; 2],
+    dt_min: f32,
+    dt_max: f32,
+    cfl: f32,
+    tscale: f32,
 }
 
 #[repr(C)]
@@ -60,6 +71,20 @@ pub struct Op {
     pub mat: u32,
     pub dir: u32,
     pub _p: [u32; 2],
+}
+
+static ENGINE_UPLOAD: std::sync::Mutex<Option<Vec<u32>>> = std::sync::Mutex::new(None);
+static ENGINE_OMEGA: std::sync::Mutex<Option<f32>> = std::sync::Mutex::new(None);
+
+/// Hand the GPU a new reciprocating-engine configuration image (engine.rs builds it; empty = no engine). Applied at the
+/// start of the next frame, together with the scene layout the caller loads.
+pub fn upload_engine(words: Vec<u32>) {
+    *ENGINE_UPLOAD.lock().unwrap() = Some(words);
+}
+
+/// Change the crank speed (rad per simulation time unit) of the running engine.
+pub fn set_engine_omega(omega: f32) {
+    *ENGINE_OMEGA.lock().unwrap() = Some(omega);
 }
 
 pub struct FrameInput {
@@ -103,6 +128,12 @@ pub struct Stats {
     pub walls: u32,
     pub max_stress: f32,
     pub thrust: [f32; 2],
+    /// Time step of the last step (time units; 1 unit = 0.034 ms), its Courant number dt*(max(|u|,|v|)+c)/dx, the largest
+    /// wave speed max(|u|,|v|)+c (cells / time unit) and the simulated time since the last scene load (time units).
+    pub dt: f32,
+    pub cfl: f32,
+    pub max_speed: f32,
+    pub sim_time: f64,
     /// Conservation accounting, cumulative since the last scene load / gas reset (same units as `conserved_totals`):
     /// mass / energy that entered through inlets, vents and the domain edges ...
     pub bnd_mass: f64,
@@ -139,7 +170,37 @@ enum ProbeState {
     Mapping,
 }
 
+/// Tuning aid (bench / debugging): `SIMDEF="T_DISS1=11.0,K_COND=0.4,RECON=1u"` overrides the value of scalar `const`s of the
+/// sim/matter/vis shader module without a rebuild. Unknown names are ignored with a warning.
+trait PipeOverrides { fn pipe_overrides(self) -> String; }
+impl PipeOverrides for String {
+    fn pipe_overrides(self) -> String {
+        let Ok(spec) = std::env::var("SIMDEF") else { return self };
+        let mut src = self;
+        for kv in spec.split(',').filter(|k| !k.is_empty()) {
+            let Some((k, v)) = kv.split_once('=') else { continue };
+            let pat = format!("\nconst {}: ", k.trim());
+            if let Some(a) = src.find(&pat) {
+                let b = a + pat.len();
+                let ty_end = src[b..].find(" = ").map(|e| b + e + 3);
+                let semi = src[b..].find(';').map(|e| b + e);
+                if let (Some(ve), Some(se)) = (ty_end, semi) { src.replace_range(ve..se, v.trim()); }
+            } else {
+                eprintln!("SIMDEF: unknown const {k}");
+            }
+        }
+        src
+    }
+}
+
+pub type PreHook = Box<dyn FnMut(&wgpu::Queue, u32, bool) + Send + Sync>;
+pub type StepHook = Box<dyn for<'a, 'b> FnMut(&'a mut wgpu::ComputePass<'b>, &'a wgpu::BindGroup) + Send + Sync>;
+pub type PostHook = Box<dyn FnMut(&wgpu::Device, &mut wgpu::CommandEncoder) + Send + Sync>;
+
 pub struct GpuSim {
+    pub pre_hook: Option<PreHook>,
+    pub step_hook: Option<StepHook>,
+    pub post_hook: Option<PostHook>,
     params: wgpu::Buffer,
     ops: wgpu::Buffer,
     meta: wgpu::Buffer,
@@ -149,6 +210,9 @@ pub struct GpuSim {
     p_ops: wgpu::ComputePipeline,
     p_move: [wgpu::ComputePipeline; 2],
     p_act: wgpu::ComputePipeline,
+    /// engine_step, engine_piston, engine_valve (engine.wgsl); dispatched each step only while a scene has an engine
+    p_eng: [wgpu::ComputePipeline; 3],
+    has_engine: bool,
     aux: wgpu::Buffer,
     sparse: bool,
     last_gravity: f32,
@@ -170,6 +234,23 @@ pub struct GpuSim {
     /// bumped on every scene load / gas reset; an in-flight readback from an older generation is ignored
     acc_gen: u32,
     probe_gen: u32,
+    /// CFL-adaptive time step on/off (default on; `IGNIS_ADT=0` env disables). Off = fixed `DT` like before.
+    pub adaptive_dt: bool,
+    /// Scene time-scale factor (default 1): physical time simulated per frame = steps * DT * time_scale. Slow scenes
+    /// (campfire, flare) are then fast-forwarded with larger/more steps; the app must multiply its clock by it.
+    pub time_scale: f32,
+    /// mean dt (time units) of the last read-back frame; steps are scaled by DT/dt_avg so a frame keeps its nominal physical time
+    dt_avg: f32,
+    dt_valid: bool,
+    dt_raw: [u32; 2],
+    dt_acc: [f64; 2],
+    /// closed-loop physical-time control: requested time so far, at the last probe copy, the last measured shortfall, step remainder
+    req_total: f64,
+    req_at_copy: f64,
+    t_err: f64,
+    carry: f32,
+    /// steps actually encoded in the last `frame()` (<= requested when dt > DT) and their summed time (time units, predicted)
+    pub steps_issued: u32,
     // rendering / VFX (vfx.rs: fx.wgsl, particles.wgsl, render.wgsl)
     vfx: Vfx,
 }
@@ -184,6 +265,7 @@ fn storage(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
 }
 
 impl GpuSim {
+    pub fn buffers(&self) -> (&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer) { (&self.u0, &self.meta, &self.wall) }
     pub fn new(device: &wgpu::Device, target: wgpu::TextureFormat) -> Self {
         let n = (W * H) as u64;
         let params = device.create_buffer(&wgpu::BufferDescriptor {
@@ -254,8 +336,9 @@ impl GpuSim {
             // matter_update or absorb_matter_emission). As module `const`s they become program-scope `constant` data.
             // None of them is ever written, so the rewrite is exact.
             source: wgpu::ShaderSource::Wgsl(
-                format!("{}\n{}\n{}\n{}", include_str!("sim.wgsl"), include_str!("matter.wgsl"), include_str!("vis.wgsl"), include_str!("matter_look.wgsl"))
+                format!("{}\n{}\n{}\n{}\n{}", include_str!("sim.wgsl"), include_str!("matter.wgsl"), include_str!("vis.wgsl"), include_str!("matter_look.wgsl"), include_str!("engine.wgsl"))
                     .replace("\nvar<private> ", "\nconst ")
+                    .pipe_overrides()
                     .into(),
             ),
         };
@@ -305,6 +388,8 @@ impl GpuSim {
             p_ops: mk("apply_ops"),
             p_move: [mk("matter_move_a"), mk("matter_move_b")],
             p_act: mk("act"),
+            p_eng: [mk("engine_step"), mk("engine_piston"), mk("engine_valve")],
+            has_engine: false,
             aux,
             sparse: std::env::var("IGNIS_DENSE").map(|v| v == "0").unwrap_or(true),
             last_gravity: f32::NAN,
@@ -324,7 +409,21 @@ impl GpuSim {
             acc: [0.0; 4],
             acc_gen: 0,
             probe_gen: 0,
+            adaptive_dt: std::env::var("IGNIS_ADT").map(|v| v != "0").unwrap_or(true),
+            time_scale: 1.0,
+            dt_avg: DT,
+            dt_valid: false,
+            dt_raw: [0; 2],
+            dt_acc: [0.0; 2],
+            req_total: 0.0,
+            req_at_copy: 0.0,
+            t_err: 0.0,
+            carry: 0.0,
+            steps_issued: 0,
             vfx,
+            pre_hook: None,
+            step_hook: None,
+            post_hook: None,
         }
     }
 
@@ -350,7 +449,19 @@ impl GpuSim {
                             self.acc[k] += raw.wrapping_sub(self.acc_raw[k]) as i32 as f64 / 1000.0;
                             self.acc_raw[k] = raw;
                         }
+                        // adaptive dt: cumulative time (x1e6, wrapping) and step counter
+                        let (dts, dn) = (m[30].wrapping_sub(self.dt_raw[0]), m[31].wrapping_sub(self.dt_raw[1]));
+                        self.dt_raw = [m[30], m[31]];
+                        self.dt_acc[0] += dts as f64 / 1.0e6;
+                        self.dt_acc[1] += dn as f64;
+                        if dn > 0 && dn < 100_000 {
+                            let a = (dts as f32 / 1.0e6 / dn as f32).clamp(DT, DT_MAX);
+                            self.dt_avg = if self.dt_valid { 0.5 * (self.dt_avg + a) } else { a };
+                            self.dt_valid = true;
+                        }
+                        self.t_err = self.req_at_copy - self.dt_acc[0];
                     }
+                    let (lam, dt_last) = (f32::from_bits(m[28]), f32::from_bits(m[29]));
                     self.stats = Stats {
                         max_p: f[16],
                         max_t: f[17],
@@ -359,6 +470,10 @@ impl GpuSim {
                         walls: m[20],
                         max_stress: f[21],
                         thrust: [fx(6), fx(7)],
+                        dt: if dt_last > 0.0 { dt_last } else { DT },
+                        cfl: if lam.is_finite() { lam * dt_last } else { 0.0 },
+                        max_speed: if lam.is_finite() { lam } else { 0.0 },
+                        sim_time: self.dt_acc[0],
                         bnd_mass: self.acc[0],
                         bnd_energy: self.acc[1],
                         src_mass: self.acc[2],
@@ -395,8 +510,24 @@ impl GpuSim {
             p_air: inp.p_air,
             cam: inp.cam,
             _p2: [DT * WALL_EVERY as f32, inp.gravity],
+            dt_min: DT,
+            dt_max: if self.adaptive_dt && self.dt_valid { DT_MAX } else { DT },
+            cfl: CFL_TARGET,
+            tscale: self.time_scale,
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
+        if let Some(words) = ENGINE_UPLOAD.lock().unwrap().take() {
+            // an empty image removes the engine; otherwise it replaces the whole config block (crank angle restarts at its value)
+            self.has_engine = !words.is_empty();
+            if self.has_engine {
+                queue.write_buffer(&self.aux, ENG_WORD * 4, bytemuck::cast_slice(&words));
+            }
+        }
+        if let Some(w) = ENGINE_OMEGA.lock().unwrap().take() {
+            if self.has_engine {
+                queue.write_buffer(&self.aux, ENG_WORD * 4, bytemuck::bytes_of(&w));
+            }
+        }
         if nops > 0 {
             queue.write_buffer(&self.ops, 0, bytemuck::cast_slice(&inp.ops[..nops]));
         }
@@ -404,6 +535,26 @@ impl GpuSim {
             queue.write_buffer(&self.meta, 0, bytemuck::cast_slice(meta));
         }
         let (gx, gy) = (W.div_ceil(16), H.div_ceil(16));
+        // Steps to encode: the frame's nominal physical time is steps * DT * time_scale; with a larger adaptive dt fewer
+        // steps cover the same time (calm scenes get cheaper), never more than the nominal count.
+        let want = inp.steps as f32 * self.time_scale.max(0.0);
+        let n_steps = if inp.steps == 0 {
+            0
+        } else if self.adaptive_dt && self.dt_valid {
+            let budget = want * DT;
+            self.req_total += budget as f64;
+            // closed loop on the simulated time the GPU really reports (3 frames late): add a fraction of the shortfall
+            let t = budget + (0.3 * self.t_err as f32).clamp(-0.5 * budget, 0.5 * budget);
+            let nf = t / self.dt_avg + self.carry;
+            let n = (nf.floor().max(1.0) as u32).min((want.ceil() as u32).max(1));
+            self.carry = (nf - n as f32).clamp(-1.0, 1.0);
+            n
+        } else {
+            self.req_total += (want * DT) as f64;
+            (want.round() as u32).max(1)
+        };
+        self.steps_issued = n_steps;
+        if let Some(h) = self.pre_hook.as_mut() { h(queue, inp.steps, inp.scene.is_some() || inp.reset_gas); }
         // anything that edits the state outside the solver invalidates the calm flags: step every tile once
         if inp.scene.is_some() || inp.meta_only.is_some() || inp.reset_gas || nops > 0 || inp.gravity != self.last_gravity {
             enc.clear_buffer(&self.aux, 0, Some(AUX_CALM_BYTES));
@@ -414,6 +565,14 @@ impl GpuSim {
             enc.clear_buffer(&self.stats_buf, 0, None);
             self.acc_raw = [0; 4];
             self.acc = [0.0; 4];
+            self.dt_raw = [0; 2];
+            self.dt_acc = [0.0; 2];
+            self.dt_valid = false;
+            self.dt_avg = DT;
+            self.req_total = 0.0;
+            self.req_at_copy = 0.0;
+            self.t_err = 0.0;
+            self.carry = 0.0;
             self.acc_gen = self.acc_gen.wrapping_add(1);
         }
         {
@@ -427,12 +586,20 @@ impl GpuSim {
                 pass.set_pipeline(&self.p_ops);
                 pass.dispatch_workgroups(gx, gy, 1);
             }
-            for _ in 0..inp.steps {
+            for _ in 0..n_steps {
                 self.step_count += 1;
                 let walls_now = self.step_count % WALL_EVERY == 0;
                 // active-tile mask for this step (from the calm flags `post` wrote last step)
                 pass.set_pipeline(&self.p_act);
                 pass.dispatch_workgroups(N_TILES.div_ceil(64), 1, 1);
+                if self.has_engine {
+                    pass.set_pipeline(&self.p_eng[0]);
+                    pass.dispatch_workgroups(1, 1, 1);
+                    pass.set_pipeline(&self.p_eng[1]);
+                    pass.dispatch_workgroups(8, 1, 1);
+                    pass.set_pipeline(&self.p_eng[2]);
+                    pass.dispatch_workgroups(8, 1, 1);
+                }
                 for (k, p) in self.steps.iter().enumerate() {
                     if k >= 3 && !walls_now {
                         break;
@@ -447,6 +614,7 @@ impl GpuSim {
                     pass.set_pipeline(mv);
                     pass.dispatch_workgroups((W / 2 + 1).div_ceil(16), (H / 2 + 1).div_ceil(16), 1);
                 }
+                if let Some(h) = self.step_hook.as_mut() { h(&mut pass, &self.cbg); }
             }
         }
         // per-frame slots 0..8 only; 8..12 are the cumulative conservation accounting
@@ -461,8 +629,9 @@ impl GpuSim {
                 pass.dispatch_workgroups(gx, gy, 1);
             }
         }
+        if let Some(h) = self.post_hook.as_mut() { h(device, enc); }
         // rendering / VFX passes (vfx.rs)
-        self.vfx.frame(queue, enc, inp.steps, inp.scene.is_some() || inp.reset_gas);
+        self.vfx.frame(queue, enc, (inp.steps as f32 * self.time_scale.max(0.0)).round() as u32, inp.scene.is_some() || inp.reset_gas);
         if self.probe_state == ProbeState::Idle {
             if let Some((x, y)) = inp.probe {
                 if x >= 0 && y >= 0 && (x as u32) < W && (y as u32) < H {
@@ -472,6 +641,7 @@ impl GpuSim {
                     enc.copy_buffer_to_buffer(&self.wall, i * 16, &self.probe_buf, 48, 16);
                     enc.copy_buffer_to_buffer(&self.stats_buf, 0, &self.probe_buf, 64, 64);
                     self.probe_gen = self.acc_gen;
+                    self.req_at_copy = self.req_total;
                     self.probe_state = ProbeState::Copied;
                 }
             }

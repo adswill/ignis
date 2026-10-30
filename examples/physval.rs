@@ -36,7 +36,7 @@ struct Params {
 /// constants without touching the files: CONST="Q_FUEL=485;T_EDC=3.5" rewrites `const NAME: T = ...;` lines,
 /// REPL="old text|||new text" (several separated by '@@@') does literal replacements.
 fn shader_source() -> String {
-    let dir = std::env::var("SRC_DIR").unwrap_or("src".into());
+    let dir = std::env::var("SRC_DIR").unwrap_or("./src".into());
     let rd = |f: &str| std::fs::read_to_string(format!("{dir}/{f}")).expect("shader source");
     let mut src = format!("{}\n{}\n{}", rd("sim.wgsl"), rd("matter.wgsl"), rd("vis.wgsl"));
     if let Ok(c) = std::env::var("CONST") {

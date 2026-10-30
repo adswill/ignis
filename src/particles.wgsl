@@ -63,7 +63,7 @@ fn spark_col(h: f32) -> vec3<f32> {
 // last frame's gas pressure per cell: blast sparks fly only where pressure jumps (explosions), not in steady chambers
 @group(0) @binding(8) var<storage, read_write> PPREV: array<f32>;
 
-fn solid_at(i: u32) -> bool { let t = META[i] & 0xFFu; return t == 1u || t == 6u || t == 8u; }
+fn solid_at(i: u32) -> bool { let t = META[i] & 0xFFu; return t == 1u || t == 6u || t == 8u || t == 9u || t == 10u || t == 12u || t == 13u; }
 fn solid_p(p: vec2<f32>) -> bool {
     if (p.x < 0.0 || p.y < 0.0 || p.x >= f32(P.w) || p.y >= f32(P.h)) { return false; }
     return solid_at(cid(i32(floor(p.x)), i32(floor(p.y))));

@@ -1207,8 +1207,7 @@ pub fn library_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("IGNIS_LIBRARY_DIR") {
         return PathBuf::from(d);
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join("Library/Application Support/Ignis/designs")
+    crate::settings::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("designs")
 }
 
 fn io_err(s: impl Into<String>) -> io::Error {

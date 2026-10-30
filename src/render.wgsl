@@ -111,6 +111,60 @@ fn hash(x: u32, y: u32, f: u32) -> f32 {
 fn lum(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)); }
 fn to_lin(c: vec3<f32>) -> vec3<f32> { return pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2)); }
 
+
+// perceptual "inferno" colormap (must match vis.wgsl)
+fn inferno(t0: f32) -> vec3<f32> {
+    let t = clamp(t0, 0.0, 1.0);
+    let c0 = vec3<f32>(0.0002189403691192265, 0.001651004631001012, -0.01948089843709184);
+    let c1 = vec3<f32>(0.1065134194856116, 0.5639564367884091, 3.932712388889277);
+    let c2 = vec3<f32>(11.60249308247187, -3.972853965665698, -15.9423941062914);
+    let c3 = vec3<f32>(-41.70399613139459, 17.43639888205313, 44.35414519872813);
+    let c4 = vec3<f32>(77.162935699427, -33.40235894210092, -81.80730925738993);
+    let c5 = vec3<f32>(-71.31942824499214, 32.62606426397723, 73.20951985803202);
+    let c6 = vec3<f32>(25.13112622477341, -12.24266895238567, -23.07032500287172);
+    return clamp(c0 + t * (c1 + t * (c2 + t * (c3 + t * (c4 + t * (c5 + t * c6))))), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+fn pres_col(p: f32) -> vec3<f32> {
+    let d = log2(max(p, 0.05));
+    if (d < 0.0) { return mix(vec3<f32>(0.02, 0.02, 0.03), vec3<f32>(0.15, 0.45, 1.0), clamp(-d / 2.0, 0.0, 1.0)); }
+    return inferno(d / 4.2) + vec3<f32>(0.02, 0.02, 0.03) * (1.0 - clamp(d, 0.0, 1.0));
+}
+// colour-bar legend for the analytic field views (pressure: 0.25..18 atm log scale, ticks at 0.25 1 2 4 8 16 atm and
+// 1 atm marked brighter; flow: 0..5 cells/time, 5 ticks). Returns (rgb, coverage). Bar: right edge of the viewport.
+fn legend(uv: vec2<f32>, view: u32) -> vec4<f32> {
+    if (view != 1u && view != 3u) { return vec4<f32>(0.0); }
+    let x0 = 0.962; let x1 = 0.978; let y0 = 0.60; let y1 = 0.94;
+    let tick_x0 = x0 - 0.010;
+    if (uv.x < tick_x0 - 0.002 || uv.x > x1 + 0.004 || uv.y < y0 - 0.012 || uv.y > y1 + 0.012) { return vec4<f32>(0.0); }
+    let v = clamp((y1 - uv.y) / (y1 - y0), 0.0, 1.0);
+    var col = vec3<f32>(0.0);
+    var a = 0.0;
+    // backing plate
+    a = 0.55; col = vec3<f32>(0.02);
+    if (uv.x >= x0 && uv.x <= x1 && uv.y >= y0 && uv.y <= y1) {
+        if (view == 1u) { col = pres_col(exp2(-2.0 + v * 6.2)); } else { col = inferno(v); }
+        a = 1.0;
+    }
+    // frame + ticks
+    let fr = 0.0012;
+    if ((abs(uv.x - x0) < fr || abs(uv.x - x1) < fr) && uv.y >= y0 && uv.y <= y1) { col = vec3<f32>(0.75); a = 1.0; }
+    if ((abs(uv.y - y0) < fr || abs(uv.y - y1) < fr) && uv.x >= x0 && uv.x <= x1) { col = vec3<f32>(0.75); a = 1.0; }
+    if (uv.x >= tick_x0 && uv.x < x0) {
+        var nt = 5.0;
+        if (view == 1u) { nt = 6.2; }
+        for (var k = 0; k <= 6; k++) {
+            var tv = f32(k) / 4.0;
+            if (view == 1u) { tv = f32(k) / 6.2; }
+            if (tv <= 1.0 && abs(uv.y - (y1 - tv * (y1 - y0))) < fr) {
+                col = vec3<f32>(0.85);
+                if (view == 1u && k == 2) { col = vec3<f32>(1.0, 1.0, 0.4); }
+                a = 1.0;
+            }
+        }
+    }
+    return vec4<f32>(col, a);
+}
+
 // Display-space shoulder used by the analytic views.
 fn tone(x: vec3<f32>) -> vec3<f32> {
     let v = max(x, vec3<f32>(0.0));
@@ -140,7 +194,7 @@ fn filmic(x: vec3<f32>) -> vec3<f32> {
     let mx = max(hp.x, max(hp.y, hp.z));
     hp = hp / max(mx, 1.0);
     // only the very brightest cores (L >> 1) drift toward the per-channel (whiter) curve
-    let w = 0.25 + 0.55 * smoothstep(1.5, 12.0, L);
+    let w = 0.18 + 0.5 * smoothstep(2.5, 14.0, L);
     return mix(hp, a, w);
 }
 
@@ -200,7 +254,7 @@ fn fire_light(cf: vec2<f32>) -> Light {
 // dark lab backdrop: faint vertical gradient (so dark smoke can occlude something)
 fn backdrop(uv: vec2<f32>, cf: vec2<f32>) -> vec3<f32> {
     // night-sky gradient with a faint, large-scale atmospheric mottling (no grid: reads as footage, not a canvas)
-    let g = mix(vec3<f32>(0.0022, 0.0028, 0.0042), vec3<f32>(0.0060, 0.0057, 0.0058), uv.y * uv.y);
+    let g = mix(vec3<f32>(0.0030, 0.0042, 0.0085), vec3<f32>(0.0200, 0.0175, 0.0170), pow(uv.y, 2.4));
     let m = nzs(cf * 0.05 + vec2<f32>(FP.stime * 0.004, 0.0), 1.0).r;
     return g * (0.85 + 0.3 * m);
 }
@@ -324,6 +378,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             FBIAS = log2(1.0 + st * 1.5);
         }
         var off = vec2<f32>(0.0);
+        var shock = 0.0;
         if (a0.a > 0.01) {
             // heat shimmer: rotated (not grid-aligned), rising, slowly evolving noise; smooth at pixel scale
             let rp = vec2<f32>(0.866 * cf.x - 0.5 * cf.y, 0.5 * cf.x + 0.866 * cf.y);
@@ -337,6 +392,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             let gy = bil(LF, cf + vec2<f32>(0.0, 1.0)).b - bil(LF, cf - vec2<f32>(0.0, 1.0)).b;
             let gpr = vec2<f32>(gx, gy);
             off -= gpr * 0.9 / (1.0 + length(gpr) * 0.25);
+            shock = length(gpr) * smoothstep(0.04, 0.2, abs(pc));
         }
         cf = clamp(cf + off, vec2<f32>(0.0), wh() - 0.001);
 
@@ -354,7 +410,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 
         if (gas_w > 0.0) {
             // ---------- gas: volumetric fire, smoke and gas clouds ----------
-            let bg = backdrop(in.uv, cf0) + lt.col * 0.035;
+            let bg = backdrop(in.uv, cf0) + lt.col * 0.06;
             // high-resolution detail field (wavelet-turbulence up-res driven by the sim velocity)
             let dh = max(textureSampleLevel(DTX, SL, cf / wh(), 0.0), vec4<f32>(0.0));
             // ---- fire: coarse chromaticity (blackbody / chemiluminescence colour from colorize) x detail luminance
@@ -391,9 +447,10 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             // sooty pyrolysis gas and smoke stay dark (no evenly orange-filled clouds).
             let hotv2 = smoothstep(0.10, 0.60, max(dh.a, a0.a));
             let gate = hotv2 * sooty * (0.45 + 0.55 * smoothstep(0.0, 0.3, Ld + L0)) + opv * sootv * 0.15 * hotv2;
-            let fillc = lt.col * vec3<f32>(1.0, 0.55, 0.26);
+            let hh = smoothstep(0.35, 0.95, max(dh.a, a0.a));
+            let fillc = lt.col * mix(vec3<f32>(1.0, 0.36, 0.10), vec3<f32>(1.0, 0.80, 0.42), hh * hh);
             // fills hollows only: where the front itself is already bright nothing is added (no blown-out cores)
-            let fillv = fillc * gate * (0.45 + 1.4 * pch) * 2.6;
+            let fillv = fillc * gate * (0.25 + 1.8 * pch) * 2.2;
             em += max(fillv - em * 0.9, vec3<f32>(0.0));
             // ---- flame colour by chemistry: advected emitter tracers recolour the flame (atomic lines / molecular
             // bands of Na, K, Cu, S, Mg...) and add their own line glow where the gas is hot
@@ -405,6 +462,43 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
                 let wq = smoothstep(0.0, 0.6, cconc);
                 let Le = lum(em);
                 em = mix(em, hn * Le * 1.2, wq * 0.85) + hn * wq * 0.10 * hotv;
+            }
+            // ---- billowing structure: flow-advected multi-octave turbulence breaks the smooth plateau of fire bodies
+            // into rolling lobes, dark gaps and ragged tongues; low parts shift toward deep orange-red (blackbody),
+            // not pastel. Clean rocket exhaust is left alone (translucent, collimated).
+            {
+                let dd = bil(LD, cf);
+                let t1 = flow_noise(cf * 0.9, dd, 2.1);
+                let t2 = flow_noise(cf * 1.3 + vec2<f32>(0.0, FP.stime * 0.7), dd, 4.6);
+                let t3 = flow_noise(cf + vec2<f32>(9.0, 3.0), dd, 9.5);
+                let tv = 0.45 * t1.r + 0.35 * t2.g + 0.20 * t3.b;
+                let md = clamp(0.12 + 1.9 * smoothstep(0.22, 0.78, tv), 0.1, 1.9);
+                let gate_t = smoothstep(0.006, 0.06, max(max(dh.g, ff.r), 0.0)) * 0.85 + 0.15 * smoothstep(0.2, 1.0, hotv);
+                let md2 = mix(1.0, md, gate_t);
+                let warm = mix(vec3<f32>(1.0, 0.50, 0.22), vec3<f32>(1.0), clamp(md2, 0.0, 1.0));
+                em = em * md2 * warm;
+            }
+            // ---- ember sparks: tiny incandescent specks rising out of hot sooty gas (wood / hydrocarbon fires)
+            {
+                let gs = 3.0;
+                let gc = floor(cf / gs);
+                var sp = vec3<f32>(0.0);
+                for (var oy = 0; oy <= 1; oy++) {
+                    let g2 = gc + vec2<f32>(0.0, f32(oy));
+                    let h0 = hash(u32(g2.x + 4096.0), u32(g2.y + 4096.0), 311u);
+                    if (h0 < 0.10) {
+                        let h1 = hash(u32(g2.x + 4096.0), u32(g2.y + 4096.0), 313u);
+                        let h2 = hash(u32(g2.x + 4096.0), u32(g2.y + 4096.0), 317u);
+                        let ph = fract(FP.stime * (0.25 + 0.35 * h1) + h2);
+                        let pos = (g2 + vec2<f32>(0.5 + 0.35 * sin(FP.stime * 3.0 * h1 + h2 * 6.28) * (0.4 + ph), 1.0 - ph * 1.6)) * gs;
+                        let dsp = length(cf - pos);
+                        let rad = 0.55 + 0.3 * h1;
+                        let life = smoothstep(0.0, 0.1, ph) * (1.0 - ph) * (1.0 - ph);
+                        let hotg = smoothstep(0.3, 0.8, max(dh.a, a0.a)) + smoothstep(0.04, 0.12, max(dh.g, ff.r)) * 0.5;
+                        sp += vec3<f32>(1.0, 0.45, 0.12) * (1.0 - smoothstep(0.0, rad, dsp)) * life * min(hotg, 1.0) * 5.0;
+                    }
+                }
+                em += sp * smoothstep(0.02, 0.12, max(max(dh.g, ff.r), 0.0));
             }
             // ---- smoke and gas clouds (Beer-Lambert opacity from the detail field)
             let cl = bsp(LB, cf);
@@ -433,7 +527,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             let self_lit = vec3<f32>(0.08) * (1.0 - sootf);
             let smoke = alb * (sky + fl + self_lit) + inner;
             // emission is partly hidden behind smoke that is in front of it (half the cloud lies in front)
-            c = bg * (1.0 - op) + smoke * op + em * (1.0 - 0.45 * op * sootf) + lt.bloom * (1.0 - 0.55 * op);
+            c = bg * (1.0 - op) + smoke * op + em * (1.0 - 0.25 * op * sootf) + lt.bloom * (1.0 - 0.55 * op);
             // white oxide smoke (Al2O3 / MgO / K2CO3 / NH4Cl): bright, sky- and fire-lit, self-shadowed from above
             if (ct.a > 0.003) {
                 // soft-edged, translucent oxide smoke: 4 extra taps (+-2 cells) remove the grid-aligned sawtooth cut-off
@@ -459,6 +553,10 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
                 c = to_lin(device_col(kind, cell.x, cell.y, loc, sh)) * (vec3<f32>(0.8) + lt.col * 2.0) + lt.bloom * 0.3;
             }
         }
+        if (gas_w > 0.0 && shock > 0.0) {
+            // blast-wave front: faint pale ring where the pressure gradient is steep (shadowgraph-like)
+            c += vec3<f32>(0.55, 0.62, 0.78) * min(shock * 0.07, 0.4) * gas_w;
+        }
         if (cov.r > 0.0) {
             let lcell = pick_cell(cell, loc, 4u);
             if (lcell.x >= 0) { c = mix(c, shade_liquid(cf, lcell, lt), cov.r); }
@@ -477,7 +575,14 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         // cores keep visible gradients instead of clipping to a flat cream fill
         {
             let L = lum(c);
-            if (L > 1.0) { c *= (1.0 + 1.6 * log(1.0 + (L - 1.0) / 1.6)) / L; }
+            if (L > 1.0) { c *= (1.0 + 0.85 * log(1.0 + (L - 1.0) / 0.85)) / L; }
+            // saturated cores keep a warm gradient instead of clipping to flat cream: overflow is tinted toward
+            // the blackbody hue of the pixel (yellow-orange -> white only at the extreme core)
+            let L2 = lum(c);
+            if (L2 > 1.2) {
+                let hue = c / max(L2, 1e-4);
+                c = mix(c, hue * L2 * vec3<f32>(1.0, 0.74, 0.46), 0.8 * smoothstep(1.2, 2.6, L2));
+            }
         }
         c = filmic(c * 1.05);
         let vg = in.uv - 0.5;
@@ -528,8 +633,27 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             if (!is_solid_kind(ku) && loc.y < 0.2) { c *= 1.25; }
             if (!is_solid_kind(kd) && loc.y > 0.8) { c *= 0.75; }
         }
+        // anti-aliased solid boundaries: blend gas field colour and wall colour by the filtered coverage mask
+        {
+            let mk = bsp(LM, cf);
+            let aa = max(fw * 0.9, 0.03);
+            let covb = smoothstep(0.5 - aa, 0.5 + aa, mk.b);
+            if (covb > 0.0 && covb < 1.0) {
+                let wc = pick_cell(cell, loc, 1u);
+                if (wc.x >= 0) {
+                    var wcol = ld(LC, wc).rgb;
+                    let wn = vec2<f32>(bil(LM, cf - vec2<f32>(0.6, 0.0)).b - bil(LM, cf + vec2<f32>(0.6, 0.0)).b,
+                                       bil(LM, cf - vec2<f32>(0.0, 0.6)).b - bil(LM, cf + vec2<f32>(0.0, 0.6)).b);
+                    wcol = wcol * (1.0 + 0.35 * clamp(-wn.y, 0.0, 1.0) - 0.2 * clamp(wn.y, 0.0, 1.0));
+                    let gcol = bsp(LB, cf).rgb;
+                    c = mix(gcol, wcol, covb);
+                }
+            }
+        }
         c = select(vec3<f32>(0.0), c, c == c);
         c = clamp(tone(c), vec3<f32>(0.0), vec3<f32>(1.0));
+        let lg = legend(in.uv, P.view);
+        c = mix(c, lg.rgb, lg.a);
     }
     if (P.srgb != 0u) { c = pow(max(c, vec3<f32>(1e-6)), vec3<f32>(2.2)); }
     return vec4<f32>(c, 1.0);

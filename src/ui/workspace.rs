@@ -243,11 +243,45 @@ pub struct Template {
     pub title: &'static str,
     pub desc: &'static str,
     pub group: &'static str,
+    /// Sub-heading inside the group (Propulsion is split into families).
+    pub sub: &'static str,
     pub build: fn() -> Scene,
 }
 
+/// Menu order of the Propulsion families.
+const PROP_SUBS: [&str; 5] = ["Air-breathing engines", "Rocket nozzles", "Solid motors", "Liquid, hybrid and cold gas", "Engine tests"];
+
+/// Descriptions that state the limits of the model plainly (override the scene author's wording).
+fn honest_desc(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "ramjet" => "Flame-holding study: spike inlet, can combustor with V-gutter flame holders. The flame stays anchored but the default 2 atm inlet produces no net thrust; raise the inlet pressure to emulate flight",
+        "scramjet" => "Direct-connect rig: plenum, Laval nozzle, isolator, fuel strut and diverging combustor. The flow is transonic, not truly supersonic combustion; thrust is indicative only",
+        "pde" => "Single-shot pulse-detonation tube with Shchelkin rings: a Mach 5 front reaches 30 atm or more. One pulse, no refill cycle; rotating detonation is not modelled",
+        "ejector" => "The same turbojet bare and inside an ejector shroud. The modelled thrust augmentation is small (about 7 %)",
+        "turbab" => "Two identical turbojets, dry (top) and with reheat (bottom). Reheat gives a hotter, longer plume and about 15 % more thrust (Heat and Fire views)",
+        "rk_srm_core" => "Three cast grain segments with a through bore in a lined case. Fast, high-thrust burn that tails off as the grain is consumed",
+        "rk_srm_end" => "Cast KNO3/sugar end-burner in a cooled case: a single flat burning face holds a steady 4-7 atm. The thrust readout does not include load carried through the grain",
+        "rk_srm_star" => "End-on slices of one case: round bore (progressive burn) beside a 6-point star bore (near-neutral burn). Shows pressure history, not a thrust test",
+        "rk_tanks" => "Sealed pressurised tanks feed oxidiser and fuel lines; thrust decays as the tanks blow down and the flame goes out near 3 atm",
+        _ => return None,
+    })
+}
+
+fn prop_sub(key: &str, idx: usize) -> &'static str {
+    match key {
+        "ramjet" | "scramjet" | "turbofan" | "turbab" | "pde" | "ejector" | "pulsejet" | "jet" | "turbojet" => PROP_SUBS[0],
+        "rk_aerospike" | "rk_expansion" | "rk_dualbell" | "nozzles" => PROP_SUBS[1],
+        "rk_srm_core" | "rk_srm_star" | "rk_srm_end" | "candy" | "srm" | "motor_end" | "motor_core" | "motor_cato" | "motor_loose" => PROP_SUBS[2],
+        "rk_hybrid" | "rk_monoprop" | "rk_tanks" | "rk_coldgas" | "rk_rcs" | "rk_expander" => PROP_SUBS[3],
+        _ => {
+            let _ = idx;
+            PROP_SUBS[4]
+        }
+    }
+}
+
 pub fn templates() -> Vec<Template> {
-    let mut v = vec![];
+    let mut v: Vec<Template> = vec![];
     for (t, d, f) in SCENARIOS.iter() {
         let group = match *t {
             "Turbojet" | "Rocket engine" | "Solid rocket motor" => "Propulsion",
@@ -256,19 +290,44 @@ pub fn templates() -> Vec<Template> {
             "Chemistry bench" => "Chemistry",
             _ => "Flames & fires",
         };
-        v.push(Template { key: t.to_lowercase(), title: t, desc: d, group, build: *f });
+        let key = t.to_lowercase();
+        let sub = match *t {
+            "Turbojet" => PROP_SUBS[0],
+            "Rocket engine" => PROP_SUBS[4],
+            "Solid rocket motor" => PROP_SUBS[2],
+            _ => "",
+        };
+        v.push(Template { key, title: t, desc: d, group, sub, build: *f });
     }
     for s in scene::SHOWCASE.iter() {
-        v.push(Template { key: s.0.to_string(), title: s.1, desc: s.2, group: "Chemistry", build: s.3 });
+        v.push(Template { key: s.0.to_string(), title: s.1, desc: s.2, group: "Chemistry", sub: "", build: s.3 });
+    }
+    for s in scene::MATERIAL_SCENES.iter() {
+        let motor = s.0.starts_with("motor_");
+        v.push(Template { key: s.0.to_string(), title: s.1, desc: honest_desc(s.0).unwrap_or(s.2), group: if motor { "Propulsion" } else { "Materials & heat transfer" }, sub: if motor { PROP_SUBS[2] } else { "" }, build: s.3 });
     }
     for (k, (t, d, f)) in crate::showcase::all().into_iter().enumerate() {
+        let key = crate::showcase::NAMES.get(k).map(|s| s.to_string()).unwrap_or_default();
         let group = match k {
             0 | 12 | 13 => "Propulsion",
             1 | 4 | 8 | 9 | 10 => "Structures & blast",
             5 | 6 | 7 | 11 | 15 | 17 => "Flames & fires",
             _ => "Materials & heat transfer",
         };
-        v.push(Template { key: crate::showcase::NAMES.get(k).map(|s| s.to_string()).unwrap_or_default(), title: t, desc: d, group, build: f });
+        let sub = if group == "Propulsion" { prop_sub(&key, k) } else { "" };
+        v.push(Template { key, title: t, desc: d, group, sub, build: f });
+    }
+    for (key, g, t, d, f) in crate::demos2::TABLE.iter() {
+        v.push(Template { key: key.to_string(), title: t, desc: d, group: g, sub: "", build: *f });
+    }
+    for (key, t, d, f) in crate::engine::PRESETS.iter() {
+        v.push(Template { key: key.to_string(), title: t, desc: d, group: "Piston engines", sub: "", build: *f });
+    }
+    for (k, (t, d, f)) in crate::propulsion::all().into_iter().enumerate() {
+        let key = crate::propulsion::NAMES.get(k).map(|s| s.to_string()).unwrap_or_default();
+        let desc = honest_desc(&key).unwrap_or(d);
+        let sub = prop_sub(&key, k);
+        v.push(Template { key, title: t, desc, group: "Propulsion", sub, build: f });
     }
     v
 }
@@ -544,8 +603,8 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, selected: bool, enabled: bool, tip
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(26.0, 24.0), if enabled { Sense::click() } else { Sense::hover() });
     let p = ui.painter();
     if selected {
-        p.rect_filled(rect, CornerRadius::same(3), ACCENT_DIM);
-        p.rect_stroke(rect, CornerRadius::same(3), Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.7)), StrokeKind::Inside);
+        p.rect_filled(rect, CornerRadius::same(3), ACCENT.gamma_multiply(0.6));
+        p.rect_stroke(rect, CornerRadius::same(3), Stroke::new(1.0_f32, ACCENT), StrokeKind::Inside);
     } else if resp.hovered() && enabled {
         p.rect_filled(rect, CornerRadius::same(3), HOVER);
     }
@@ -558,6 +617,60 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, selected: bool, enabled: bool, tip
     };
     draw_icon(p, rect, icon, col);
     resp.on_hover_text(tip)
+}
+
+/// Colour of a category's header tick in the library.
+fn cat_colour(c: Cat) -> Color32 {
+    match c {
+        Cat::Structure => Color32::from_rgb(140, 150, 165),
+        Cat::Burnable => Color32::from_rgb(214, 120, 70),
+        Cat::Powders => Color32::from_rgb(200, 180, 110),
+        Cat::Liquids => Color32::from_rgb(90, 150, 220),
+        Cat::Metals => Color32::from_rgb(190, 190, 200),
+        Cat::Chemicals => Color32::from_rgb(120, 190, 140),
+        Cat::Machines => Color32::from_rgb(170, 130, 200),
+        Cat::Gases => Color32::from_rgb(150, 200, 210),
+        Cat::Tools => Color32::from_rgb(180, 150, 150),
+    }
+}
+
+/// Small procedural material swatch: shows the texture family (grain, liquid, solid, crystal) so materials
+/// can be told apart in lists, not just by a flat colour.
+pub(super) fn thumb(p: &egui::Painter, r: Rect, e: &Element, dim: bool) {
+    let mut h: u32 = 2166136261;
+    for b in e.code.bytes() {
+        h = (h ^ b as u32).wrapping_mul(16777619);
+    }
+    let mut rnd = move || {
+        h ^= h << 13;
+        h ^= h >> 17;
+        h ^= h << 5;
+        (h & 0xffff) as f32 / 65535.0
+    };
+    let base = e.color;
+    let sh = |k: f32| -> Color32 {
+        let f = |c: u8| ((c as f32 * k).clamp(0.0, 255.0)) as u8;
+        Color32::from_rgb(f(base.r()), f(base.g()), f(base.b()))
+    };
+    p.rect_filled(r, CornerRadius::same(2), sh(0.8));
+    let (nx, ny) = (((r.width() / 3.0) as usize).max(3), ((r.height() / 3.0) as usize).max(3));
+    let (cw, ch) = (r.width() / nx as f32, r.height() / ny as f32);
+    for j in 0..ny {
+        for i in 0..nx {
+            let cell = Rect::from_min_size(r.min + Vec2::new(i as f32 * cw, j as f32 * ch), Vec2::new(cw + 0.5, ch + 0.5));
+            let k = match e.cat {
+                Cat::Powders | Cat::Chemicals | Cat::Burnable => 0.6 + rnd() * 0.7,
+                Cat::Liquids | Cat::Gases => 0.75 + 0.3 * ((i as f32 * 0.9 + j as f32 * 0.6).sin() * 0.5 + 0.5) + (rnd() - 0.5) * 0.06,
+                Cat::Metals | Cat::Structure => 1.15 - 0.4 * (j as f32 / ny as f32) + (rnd() - 0.5) * 0.08,
+                _ => 0.9 + rnd() * 0.2,
+            };
+            p.rect_filled(cell, CornerRadius::ZERO, sh(k));
+        }
+    }
+    p.rect_stroke(r, CornerRadius::same(2), Stroke::new(1.0_f32, Color32::from_black_alpha(if dim { 200 } else { 110 })), StrokeKind::Inside);
+    if dim {
+        p.rect_filled(r, CornerRadius::same(2), Color32::from_black_alpha(130));
+    }
 }
 
 fn vsep(ui: &mut egui::Ui) {
@@ -600,7 +713,7 @@ fn chart(ui: &mut egui::Ui, size: Vec2, title: &str, x_label: &str, y_unit: &str
     if !y_unit.is_empty() {
         p.text(rect.min + Vec2::new(14.0 + tw, 6.0), Align2::LEFT_TOP, format!("[{y_unit}]"), small_font(), FAINT);
     }
-    let plot = Rect::from_min_max(rect.min + Vec2::new(48.0, 28.0), rect.max - Vec2::new(10.0, 20.0));
+    let plot = Rect::from_min_max(rect.min + Vec2::new(48.0, 28.0), rect.max - Vec2::new(10.0, 32.0));
     let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
     for s in series {
         for q in s.pts {
@@ -656,11 +769,17 @@ fn chart(ui: &mut egui::Ui, size: Vec2, title: &str, x_label: &str, y_unit: &str
             Some(v) => format!("{}  {}", s.name, tick_label(v, ystep / 10.0)),
             None => s.name.clone(),
         };
-        let g = p.layout_no_wrap(txt, small_font(), TEXT);
-        lx -= g.size().x;
-        p.galley(Pos2::new(lx, rect.top() + 6.0), g, TEXT);
-        p.rect_filled(Rect::from_min_size(Pos2::new(lx - 12.0, rect.top() + 11.0), Vec2::new(8.0, 2.0)), CornerRadius::ZERO, s.color);
-        lx -= 22.0;
+        let mut g = p.layout_no_wrap(txt, small_font(), TEXT);
+        let limit = rect.left() + 20.0 + tw + if y_unit.is_empty() { 0.0 } else { 40.0 };
+        if lx - g.size().x - 22.0 < limit {
+            g = p.layout_no_wrap(last.map(|v| tick_label(v, ystep / 10.0)).unwrap_or_default(), small_font(), s.color);
+        }
+        if lx - g.size().x - 22.0 >= limit {
+            lx -= g.size().x;
+            p.galley(Pos2::new(lx, rect.top() + 6.0), g, TEXT);
+            p.rect_filled(Rect::from_min_size(Pos2::new(lx - 12.0, rect.top() + 11.0), Vec2::new(8.0, 2.0)), CornerRadius::ZERO, s.color);
+            lx -= 22.0;
+        }
         let mut pts: Vec<Pos2> = Vec::with_capacity(s.pts.len());
         let flush = |pts: &mut Vec<Pos2>| {
             if pts.len() > 1 {
@@ -701,7 +820,7 @@ fn chart_dual(ui: &mut egui::Ui, size: Vec2, title: &str, x_label: &str, a: (&st
     p.rect_filled(rect, CornerRadius::same(2), Color32::from_rgb(20, 21, 24));
     p.rect_stroke(rect, CornerRadius::same(2), Stroke::new(1.0_f32, BORDER), StrokeKind::Inside);
     p.text(rect.min + Vec2::new(8.0, 6.0), Align2::LEFT_TOP, title, head_font(), TEXT);
-    let plot = Rect::from_min_max(rect.min + Vec2::new(48.0, 28.0), rect.max - Vec2::new(48.0, 20.0));
+    let plot = Rect::from_min_max(rect.min + Vec2::new(48.0, 28.0), rect.max - Vec2::new(48.0, 32.0));
     let mut x0 = f32::MAX;
     let mut x1 = f32::MIN;
     let range = |pts: &[[f32; 2]], x0: &mut f32, x1: &mut f32| -> Option<(f32, f32)> {
@@ -768,11 +887,17 @@ fn chart_dual(ui: &mut egui::Ui, size: Vec2, title: &str, x_label: &str, a: (&st
             Some(v) => format!("{name}  {} {unit}", tick_label(v, ystep / 10.0)),
             None => name.to_string(),
         };
-        let g = p.layout_no_wrap(txt, small_font(), TEXT);
-        legend_x -= g.size().x;
-        p.galley(Pos2::new(legend_x, rect.top() + 6.0), g, TEXT);
-        p.rect_filled(Rect::from_min_size(Pos2::new(legend_x - 12.0, rect.top() + 11.0), Vec2::new(8.0, 2.0)), CornerRadius::ZERO, col);
-        legend_x -= 22.0;
+        let mut g = p.layout_no_wrap(txt, small_font(), TEXT);
+        let limit = rect.left() + 110.0;
+        if legend_x - g.size().x - 22.0 < limit {
+            g = p.layout_no_wrap(last.map(|v| tick_label(v, ystep / 10.0)).unwrap_or_default(), small_font(), col);
+        }
+        if legend_x - g.size().x - 22.0 >= limit {
+            legend_x -= g.size().x;
+            p.galley(Pos2::new(legend_x, rect.top() + 6.0), g, TEXT);
+            p.rect_filled(Rect::from_min_size(Pos2::new(legend_x - 12.0, rect.top() + 11.0), Vec2::new(8.0, 2.0)), CornerRadius::ZERO, col);
+            legend_x -= 22.0;
+        }
         if let Some(xv) = hx {
             if let Some(q) = pts.iter().min_by(|a, b| (a[0] - xv).abs().total_cmp(&(b[0] - xv).abs())) {
                 hover_lines.push(format!("{name}: {} {unit}", tick_label(q[1], ystep / 100.0)));
@@ -870,17 +995,37 @@ impl App {
             self.start_sandbox_named("Blank canvas", Scene::empty());
             ui.close_menu();
         }
+        if ui.button("Browse templates...").clicked() {
+            self.show_templates = true;
+            ui.close_menu();
+        }
+        if ui.button("Engine designer...").clicked() {
+            self.show_engine = true;
+            ui.close_menu();
+        }
         ui.menu_button("New from template", |ui| {
             ui.set_min_width(260.0);
             let ts = templates();
-            for g in ["Propulsion", "Flames & fires", "Structures & blast", "Chemistry", "Materials & heat transfer", "General"] {
+            for g in ["Propulsion", "Piston engines", "Flames & fires", "Structures & blast", "Chemistry", "Materials & heat transfer", "General"] {
                 let items: Vec<&Template> = ts.iter().filter(|t| t.group == g).collect();
                 if items.is_empty() {
                     continue;
                 }
                 ui.menu_button(g, |ui| {
-                    ui.set_min_width(280.0);
+                    ui.set_min_width(300.0);
+                    let mut items = items;
+                    if g == "Propulsion" {
+                        items.sort_by_key(|t| PROP_SUBS.iter().position(|s| *s == t.sub).unwrap_or(9));
+                    }
+                    let mut last = "";
                     for t in items {
+                        if !t.sub.is_empty() && t.sub != last {
+                            if !last.is_empty() {
+                                ui.add_space(4.0);
+                            }
+                            ui.label(RichText::new(t.sub.to_uppercase()).font(head_font()).color(FAINT));
+                            last = t.sub;
+                        }
                         if ui.button(t.title).on_hover_text(t.desc).clicked() {
                             self.load_template(t);
                             ui.close_menu();
@@ -971,8 +1116,13 @@ impl App {
         ui.checkbox(&mut self.show_grid, "Grid lines");
         ui.checkbox(&mut self.show_legend, "Colour-map legend");
         ui.separator();
-        if ui.add(egui::Button::new("Zoom to fit").shortcut_text("0")).clicked() {
+        if ui.add(egui::Button::new("Zoom to fit geometry").shortcut_text("Shift+F")).clicked() {
+            self.fit_req = true;
+            ui.close_menu();
+        }
+        if ui.add(egui::Button::new("Whole domain (1x)").shortcut_text("0")).clicked() {
             self.zoom = 1.0;
+            self.center = Vec2::new(W as f32 / 2.0, H as f32 / 2.0);
             ui.close_menu();
         }
         if ui.button("Zoom in").clicked() {
@@ -1279,6 +1429,7 @@ impl App {
                         self.picker = false;
                     }
                 }
+                vsep(ui);
                 if icon_button(ui, Icon::Erase, self.tool == Tool::Erase, edit_ok, "Eraser (E); right-drag also erases").clicked() {
                     self.pick(Tool::Erase);
                 }
@@ -1292,6 +1443,19 @@ impl App {
                     self.picker = !self.picker;
                     self.place = None;
                 }
+                ui.add_space(6.0);
+                let active = if self.picker {
+                    "Pick"
+                } else if self.tool == Tool::Erase {
+                    "Eraser"
+                } else if self.tool == Tool::Gas(8) {
+                    "Mix"
+                } else if self.tool == Tool::Gas(super::prop::OP_CAST) {
+                    "Cast"
+                } else {
+                    SHAPES.iter().find(|x| x.0 == self.shape).map(|x| x.1).unwrap_or("Draw")
+                };
+                ui.label(RichText::new(active).color(TEXT).size(11.5));
                 ui.add_space(6.0);
                 ui.label(muted("Size"));
                 ui.add(egui::DragValue::new(&mut self.brush).range(0..=24).speed(0.1).custom_formatter(|v, _| format!("{} cm", 2 * v as i32 + 1))).on_hover_text("Brush diameter ([ and ])");
@@ -1331,6 +1495,7 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // current material
+                    ui.spacing_mut().item_spacing.x = 8.0;
                     if ui.add(egui::Button::new("Propellant designer").selected(self.show_designer)).on_hover_text("Formulate a propellant, predict its burn rate and flame temperature, paint a cast grain (D)").clicked() {
                         self.show_designer = !self.show_designer;
                     }
@@ -1370,29 +1535,39 @@ impl App {
                 ui.add_space(-10.0);
                 ui.label(RichText::new(state).color(TEXT).size(11.0));
                 let st = |ui: &mut egui::Ui, k: &str, v: String, tip: &str| {
-                    ui.label(RichText::new(format!("{k} ")).color(FAINT).size(11.0)).on_hover_text(tip);
-                    ui.add_space(-14.0);
-                    ui.label(RichText::new(v).monospace().color(TEXT).size(11.0)).on_hover_text(tip);
+                    ui.scope(|ui| {
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        ui.label(RichText::new(k).color(FAINT).size(11.0)).on_hover_text(tip);
+                        ui.label(RichText::new(v).monospace().color(TEXT).size(11.0)).on_hover_text(tip);
+                    });
                 };
                 st(ui, "t", format!("{:.3} ms", self.sim_time * MS_PER_UNIT), "Simulated physical time since the setup was loaded");
+                let ratio = if self.paused || self.sim_rate < 1e-4 { "paused".to_string() } else { format!("1 : {:.0}", 1000.0 / self.sim_rate) };
+                st(ui, "sim : wall", ratio, "Simulated time to wall-clock time. 1 : 1000 means one second of simulated time takes about 1000 s on screen (slow motion). Combustion events last milliseconds, so even 1× is deep slow motion; the ratio drops when the frame budget limits the solver");
                 let rate = self.steps_last as f32 / (self.frame_ms / 1000.0).max(1e-3);
-                st(ui, "steps", format!("{} /frame  {:.0} /s", self.steps_last, rate), "Solver steps per displayed frame and per wall-clock second");
-                st(ui, "Δt", format!("{:.3} µs", DT * MS_PER_UNIT * 1000.0), "Fixed solver time step (1 cell = 1 cm)");
+                st(ui, "steps", format!("{}/frame  {:.0}/s", self.steps_last, rate), "Solver steps per displayed frame and per wall-clock second (the governor raises this until a frame approaches 16.7 ms)");
+                st(ui, "dt", format!("{:.2} us", DT * MS_PER_UNIT * 1000.0), "Fixed solver time step (1 cell = 1 cm)");
                 let cfl_c = if self.diag.cfl > 0.9 { BAD } else if self.diag.cfl > 0.6 { WARN } else { TEXT };
-                ui.label(RichText::new("CFL ").color(FAINT).size(11.0));
-                ui.add_space(-14.0);
-                ui.label(RichText::new(if self.diag.valid { format!("{:.2}", self.diag.cfl) } else { "—".into() }).monospace().color(cfl_c).size(11.0)).on_hover_text("Courant number max(|u| + c)·Δt/Δx over the domain (stable below ~0.9)");
-                let rt = if self.paused { 0.0 } else { TPS * self.speed * self.rt_factor * MS_PER_UNIT / 10.0 };
-                st(ui, "real-time", format!("{rt:.3} %"), "Simulated time per wall-clock time (combustion runs in microseconds: ~0.1 % at 1×)");
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    ui.label(RichText::new("CFL").color(FAINT).size(11.0));
+                    ui.label(RichText::new(if self.diag.valid { format!("{:.2}", self.diag.cfl) } else { "—".into() }).monospace().color(cfl_c).size(11.0)).on_hover_text("Courant number max(|u| + c)·Δt/Δx over the domain (stable below ~0.9)");
+                });
                 if self.diag.valid {
-                    st(ui, "Δm", format!("{:+.3} %", self.diag.mass_drift()), "Total gas mass relative to the start (open boundaries, inlets and reactions change it physically)");
-                    st(ui, "ΔE", format!("{:+.3} %", self.diag.energy_drift()), "Total gas energy relative to the start (includes heat release and losses)");
+                    vsep(ui);
+                    st(ui, "dm", format!("{:+.3} %", self.diag.mass_drift()), "Total gas mass relative to the start (open boundaries, inlets and reactions change it physically)");
+                    st(ui, "dE", format!("{:+.3} %", self.diag.energy_drift()), "Total gas energy relative to the start (includes heat release and losses)");
                 }
-                let gpu = self.steps_last as f32 * 0.46 + 0.7;
-                st(ui, "GPU", format!("≈{gpu:.1} ms"), "Estimated GPU time per frame (0.46 ms per solver step + 0.7 ms render, M2 Pro baseline)");
+                vsep(ui);
+                let gpu = (self.steps_last as f32 * self.step_cost_ms + 2.0).min(self.frame_ms.max(1.0));
+                st(ui, "GPU", format!("≈{gpu:.1} ms"), "Estimated GPU time per frame: steps × measured per-step cost + ~2 ms for diagnostics and rendering (no hardware timestamps)");
                 st(ui, "frame", format!("{:.1} ms", self.frame_ms), "Wall-clock frame time");
                 let _ = stats;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mt = if self.settings.muted { "Sound off (click to unmute)" } else { "Sound on (click to mute)" };
+                    if ui.add(egui::Button::new(RichText::new(if self.settings.muted { "Sound: off" } else { "Sound: on" }).size(11.0).color(if self.settings.muted { WARN } else { MUTED })).frame(false)).on_hover_text(mt).clicked() {
+                        self.settings.muted = !self.settings.muted;
+                    }
                     if let Some((msg, t0, lvl)) = &mut self.status_msg {
                         if *t0 == 0.0 {
                             *t0 = now;
@@ -1427,14 +1602,44 @@ impl App {
                 }
             }
             ui.add_space(4.0);
-            // column header
+            // filter chips
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(3.0, 3.0);
+                let chips: [(&str, Option<Cat>); 7] = [("All", None), ("Solids", Some(Cat::Structure)), ("Powders", Some(Cat::Powders)), ("Liquids", Some(Cat::Liquids)), ("Metals", Some(Cat::Metals)), ("Chemicals", Some(Cat::Chemicals)), ("Explosives", Some(Cat::Burnable))];
+                for (n, c) in chips {
+                    if ui.add(egui::Button::new(RichText::new(n).size(10.5)).selected(self.lib_filter == c).min_size(Vec2::new(0.0, 17.0))).clicked() {
+                        self.lib_filter = c;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            // column header (click a column to sort, click again to reverse)
             let w = ui.available_width();
-            let (hr, hresp) = ui.allocate_exact_size(Vec2::new(w, 16.0), Sense::hover());
-            hresp.on_hover_text("ρ: density.  T*: characteristic transition temperature (melting point for solids, ignition / decomposition onset for reactive materials).");
+            let (hr, hresp) = ui.allocate_exact_size(Vec2::new(w, 16.0), Sense::click());
+            let hover_x = hresp.hover_pos().map(|p| p.x);
+            let col_of = |x: f32| if x > hr.right() - 40.0 { 3u8 } else if x > hr.right() - 112.0 { 2 } else { 1 };
+            let hresp = hresp.on_hover_text("Click a column to sort.  ρ: density.  T*: characteristic transition temperature (melting point for solids, ignition or decomposition onset for reactive materials).");
+            if hresp.clicked() {
+                if let Some(x) = hover_x {
+                    let c = col_of(x);
+                    if self.lib_sort == c {
+                        if self.lib_desc {
+                            self.lib_sort = 0;
+                            self.lib_desc = false;
+                        } else {
+                            self.lib_desc = true;
+                        }
+                    } else {
+                        self.lib_sort = c;
+                        self.lib_desc = false;
+                    }
+                }
+            }
+            let arrow = |c: u8| if self.lib_sort == c { if self.lib_desc { " \u{25BE}" } else { " \u{25B4}" } } else { "" };
             let p = ui.painter();
-            p.text(hr.left_center() + Vec2::new(18.0, 0.0), Align2::LEFT_CENTER, "Name", small_font(), FAINT);
-            p.text(Pos2::new(hr.right() - 56.0, hr.center().y), Align2::RIGHT_CENTER, "ρ kg/m³", small_font(), FAINT);
-            p.text(Pos2::new(hr.right() - 2.0, hr.center().y), Align2::RIGHT_CENTER, format!("T* {}", self.units.t_unit()), small_font(), FAINT);
+            p.text(hr.left_center() + Vec2::new(18.0, 0.0), Align2::LEFT_CENTER, format!("Name{}", arrow(1)), small_font(), if self.lib_sort == 1 { TEXT } else { FAINT });
+            p.text(Pos2::new(hr.right() - 56.0, hr.center().y), Align2::RIGHT_CENTER, format!("ρ kg/m³{}", arrow(2)), small_font(), if self.lib_sort == 2 { TEXT } else { FAINT });
+            p.text(Pos2::new(hr.right() - 2.0, hr.center().y), Align2::RIGHT_CENTER, format!("T* {}{}", self.units.t_unit(), arrow(3)), small_font(), if self.lib_sort == 3 { TEXT } else { FAINT });
             p.hline(hr.x_range(), hr.bottom(), Stroke::new(1.0_f32, BORDER));
             egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("libscroll").show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -1444,15 +1649,57 @@ impl App {
                     let items: Vec<&'static Element> = m.palette.iter().filter_map(|t| elements::find(*t)).filter(|e| hit(e)).collect();
                     self.lib_group(ui, "Experiment materials", "exp", &items, true);
                 }
-                if !self.favs.is_empty() {
+                let plain = self.lib_filter.is_none() && self.lib_sort == 0;
+                if plain && !self.favs.is_empty() {
                     let items: Vec<&'static Element> = self.favs.iter().filter_map(|t| elements::find(*t)).filter(|e| hit(e)).collect();
                     self.lib_group(ui, "Favourites", "fav", &items, self.run.is_none());
                 }
-                self.compositions_group(ui, &q);
+                if plain {
+                    self.compositions_group(ui, &q);
+                }
                 let cur_cat = elements::find(self.tool).map(|e| e.cat);
+                let filt = self.lib_filter;
+                if self.lib_sort != 0 {
+                    let mut items: Vec<&'static Element> = elements::all().filter(|e| filt.map(|c| e.cat == c).unwrap_or(true) && hit(e)).collect();
+                    let key = |e: &&'static Element| -> f32 {
+                        let (rho, tk) = props(e.tool);
+                        match self.lib_sort {
+                            2 => rho.unwrap_or(f32::NAN),
+                            _ => tk.map(|x| x.0).unwrap_or(f32::NAN),
+                        }
+                    };
+                    if self.lib_sort == 1 {
+                        items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                    } else {
+                        // materials without the property always sink to the bottom
+                        items.sort_by(|a, b| {
+                            let (ka, kb) = (key(a), key(b));
+                            match (ka.is_nan(), kb.is_nan()) {
+                                (true, true) => std::cmp::Ordering::Equal,
+                                (true, false) => std::cmp::Ordering::Greater,
+                                (false, true) => std::cmp::Ordering::Less,
+                                _ => ka.total_cmp(&kb),
+                            }
+                        });
+                    }
+                    if self.lib_desc {
+                        items.reverse();
+                        if self.lib_sort != 1 {
+                            let (have, none): (Vec<_>, Vec<_>) = items.into_iter().partition(|e| !key(e).is_nan());
+                            items = have.into_iter().chain(none).collect();
+                        }
+                    }
+                    for e in items {
+                        self.lib_row(ui, e);
+                    }
+                    return;
+                }
                 for (cat, name, _) in CATS.iter() {
+                    if filt.map(|c| c != *cat).unwrap_or(false) {
+                        continue;
+                    }
                     let items: Vec<&'static Element> = elements::all().filter(|e| e.cat == *cat && hit(e)).collect();
-                    let open = self.run.is_none() && (cur_cat == Some(*cat) || *cat == Cat::Structure);
+                    let open = self.run.is_none() && (cur_cat == Some(*cat) || *cat == Cat::Structure || filt.is_some());
                     self.lib_group(ui, name, name, &items, open);
                 }
             });
@@ -1466,6 +1713,8 @@ impl App {
         }
         let searching = !self.search.trim().is_empty();
         let mut job = egui::text::LayoutJob::default();
+        let tick = items.first().map(|e| cat_colour(e.cat)).unwrap_or(FAINT);
+        job.append("\u{25A0} ", 0.0, egui::TextFormat { font_id: small_font(), color: tick, ..Default::default() });
         job.append(title, 0.0, egui::TextFormat { font_id: head_font(), color: TEXT, ..Default::default() });
         job.append(&format!("   {}", items.len()), 0.0, egui::TextFormat { font_id: small_font(), color: FAINT, ..Default::default() });
         let hdr = egui::CollapsingHeader::new(job)
@@ -1483,7 +1732,7 @@ impl App {
 
     fn lib_row(&mut self, ui: &mut egui::Ui, e: &'static Element) {
         let w = ui.available_width();
-        let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 20.0), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 22.0), Sense::click());
         let allowed = self.allowed(e.tool);
         let sel = self.tool == e.tool;
         let p = ui.painter();
@@ -1493,14 +1742,14 @@ impl App {
         } else if resp.hovered() {
             p.rect_filled(rect, CornerRadius::same(2), HOVER);
         }
-        let sw = Rect::from_center_size(Pos2::new(rect.left() + 10.0, rect.center().y), Vec2::splat(9.0));
-        p.rect_filled(sw, CornerRadius::same(1), if allowed { e.color } else { e.color.gamma_multiply(0.3) });
+        let sw = Rect::from_center_size(Pos2::new(rect.left() + 14.0, rect.center().y), Vec2::new(18.0, 14.0));
+        thumb(p, sw, e, !allowed);
         let tc = if !allowed { FAINT } else if sel { STRONG } else { TEXT };
         let name = p.layout_no_wrap(e.name.to_string(), FontId::proportional(12.0), tc);
         let nw = name.size().x;
-        p.galley(Pos2::new(rect.left() + 20.0, rect.center().y - name.size().y / 2.0), name, tc);
+        p.galley(Pos2::new(rect.left() + 28.0, rect.center().y - name.size().y / 2.0), name, tc);
         if rect.width() > 250.0 {
-            p.text(Pos2::new(rect.left() + 26.0 + nw, rect.center().y + 0.5), Align2::LEFT_CENTER, e.code, FontId::monospace(9.5), FAINT);
+            p.text(Pos2::new(rect.left() + 34.0 + nw, rect.center().y + 0.5), Align2::LEFT_CENTER, e.code, FontId::monospace(9.5), FAINT);
         }
         let (rho, tk) = props(e.tool);
         let col = if allowed { MUTED } else { FAINT };
@@ -1519,7 +1768,9 @@ impl App {
         }
         let tip = {
             let tk = tk.map(|(t, k)| format!("\n{}: {}", k, self.units.ft(t))).unwrap_or_default();
-            format!("{} ({})\n{}{}", e.name, e.code, e.blurb, tk)
+            let cat = CATS.iter().find(|c| c.0 == e.cat).map(|c| c.1).unwrap_or("");
+            let rho = rho.map(|r| format!("\nDensity: {r:.0} kg/m³")).unwrap_or_default();
+            format!("{} ({}), {}\n{}{}{}", e.name, e.code, cat, e.blurb, rho, tk)
         };
         let resp = resp.on_hover_text(tip);
         resp.context_menu(|ui| {
@@ -1557,12 +1808,22 @@ impl App {
                 if self.run.is_some() {
                     self.experiment_panel(ui, frame, stats);
                 }
-                self.material_sheet(ui);
-                self.boundary_panel(ui);
+                // Live measurements always lead: the cell under the cursor (gas, matter, wall), then domain extrema.
+                // The static material data sheet stays collapsed until a material is picked in the library.
                 let r = ui.scope(|ui| self.cell_sheet(ui, probe)).response.rect;
                 self.tut_rects.insert("inspector".into(), r);
                 let r = ui.scope(|ui| self.domain_sheet(ui, stats)).response.rect;
                 self.tut_rects.insert("readouts".into(), r);
+                let picked = self.insp_tool.map(|t| t != self.tool).unwrap_or(false);
+                self.insp_tool = Some(self.tool);
+                let mut hdr = egui::CollapsingHeader::new(RichText::new("MATERIAL DATA SHEET").size(10.0).color(FAINT)).id_salt("sec_material").default_open(false);
+                if picked {
+                    hdr = hdr.open(Some(true));
+                }
+                hdr.show(ui, |ui| {
+                    self.material_sheet(ui);
+                });
+                self.boundary_panel(ui);
             });
         });
         let _ = resp;
@@ -1583,7 +1844,8 @@ impl App {
         }
         let Some(e) = elements::find(self.tool) else { return };
         ui.horizontal(|ui| {
-            swatch(ui, e.color, 14.0);
+            let (tr, _) = ui.allocate_exact_size(Vec2::new(44.0, 32.0), Sense::hover());
+            thumb(ui.painter(), tr, e, false);
             ui.label(RichText::new(e.name).font(FontId::new(13.0, fam("semibold"))).color(STRONG));
             ui.label(faint(e.code));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1753,6 +2015,8 @@ impl App {
     fn cell_sheet(&mut self, ui: &mut egui::Ui, probe: Option<ProbeData>) {
         let (x, y) = self.last_probe_cell;
         let Some(pd) = probe.filter(|_| self.hover.is_some() || self.pin_cell) else {
+            section(ui, "Cell at cursor");
+            ui.label(muted("Move the pointer over the viewport to read gas state, matter and wall data. Click with the Pick tool to pin a cell."));
             return;
         };
         section(ui, "Cell at cursor");
@@ -1918,9 +2182,7 @@ impl App {
         let live = m.live;
         ui.horizontal(|ui| match phase {
             Phase::Build => {
-                if ui.add(egui::Button::new(RichText::new("Start run").color(STRONG)).fill(ACCENT_DIM).stroke(Stroke::new(1.0_f32, ACCENT))).clicked() {
-                    self.begin_test(frame);
-                }
+                ui.label(muted("Press Start run in the toolbar (Enter) to lock the geometry."));
             }
             Phase::Test => {
                 if !live && ui.button("Abort run").clicked() {
@@ -2108,28 +2370,47 @@ impl App {
 
     fn tab_plots(&mut self, ui: &mut egui::Ui) {
         let u = self.units;
-        let t: Vec<f32> = self.hist.t.iter().copied().collect();
-        let mk = |q: &VecDeque<f32>, f: &dyn Fn(f32) -> f32| -> Vec<[f32; 2]> { t.iter().zip(q.iter()).map(|(a, b)| [*a, f(*b)]).collect() };
-        let p = mk(&self.hist.p, &|v| u.p(v));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(RichText::new("Window").size(11.0).color(FAINT));
+            for (lbl, w) in [("All", 0.0f32), ("0.5 ms", 0.5), ("1 ms", 1.0), ("2 ms", 2.0), ("5 ms", 5.0), ("20 ms", 20.0), ("100 ms", 100.0)] {
+                if ui.add(egui::Button::new(RichText::new(lbl).size(11.0)).selected((self.plot_win - w).abs() < 1e-6).min_size(Vec2::new(0.0, 18.0))).clicked() {
+                    self.plot_win = w;
+                }
+            }
+            vsep(ui);
+            ui.checkbox(&mut self.plot_log_p, RichText::new("Log pressure axis").size(11.0));
+        });
+        let tmax_all = self.hist.t.iter().copied().fold(0.0f32, f32::max);
+        let t_lo = if self.plot_win > 0.0 { tmax_all - self.plot_win } else { f32::MIN };
+        let keep: Vec<bool> = self.hist.t.iter().map(|v| *v >= t_lo).collect();
+        let tmax = tmax_all;
+        let (tscale, tl) = if tmax < 1.0 { (1000.0, "t, us") } else if tmax >= 1000.0 { (0.001, "t, s") } else { (1.0, "t, ms") };
+        let t: Vec<f32> = self.hist.t.iter().map(|v| v * tscale).collect();
+        let mk = |q: &VecDeque<f32>, f: &dyn Fn(f32) -> f32| -> Vec<[f32; 2]> { t.iter().zip(q.iter()).zip(keep.iter()).filter(|(_, k)| **k).map(|((a, b), _)| [*a, f(*b)]).collect() };
+        let logp = self.plot_log_p;
+        let p = mk(&self.hist.p, &|v| if logp { u.p(v).max(1e-3).log10() } else { u.p(v) });
+        let p_unit = if logp { format!("log10 {}", u.p_unit()) } else { u.p_unit().to_string() };
         let tt = mk(&self.hist.temp, &|v| u.t(v));
         let th = mk(&self.hist.thrust, &|v| v);
         let br = mk(&self.hist.burn, &|v| v);
         let wh = mk(&self.hist.wall_heat, &|v| v);
         let ss = mk(&self.hist.stress, &|v| v);
-        let avail = ui.available_size();
+        let mut avail = ui.available_size();
+        avail.y -= 4.0;
         let n = if avail.x > 1100.0 { 4 } else { 3 };
         let w = (avail.x - 8.0 * (n as f32 - 1.0)) / n as f32;
         let size = Vec2::new(w, avail.y.max(100.0));
         ui.horizontal(|ui| {
-            chart(ui, size, "Peak pressure", "t, ms", u.p_unit(), &[Series { name: "p max".into(), color: Color32::from_rgb(110, 160, 235), pts: &p }], Some(0.0));
-            chart(ui, size, "Peak gas temperature", "t, ms", u.t_unit(), &[Series { name: "T max".into(), color: Color32::from_rgb(230, 150, 70), pts: &tt }], None);
+            chart(ui, size, "Peak pressure", tl, &p_unit, &[Series { name: "p max".into(), color: Color32::from_rgb(110, 160, 235), pts: &p }], if logp { None } else { Some(0.0) });
+            chart(ui, size, "Peak gas temperature", tl, u.t_unit(), &[Series { name: "T max".into(), color: Color32::from_rgb(230, 150, 70), pts: &tt }], None);
             if self.engine_scene {
-                chart_dual(ui, size, "Thrust / fuel flow", "t, ms", ("F", "kN", Color32::from_rgb(200, 200, 205), &th), ("ṁ", "kg/s", Color32::from_rgb(120, 190, 120), &br));
+                chart_dual(ui, size, "Thrust / fuel flow", tl, ("F", "kN", Color32::from_rgb(200, 200, 205), &th), ("ṁ", "kg/s", Color32::from_rgb(120, 190, 120), &br));
             } else {
-                chart(ui, size, "Fuel consumption", "t, ms", "kg/s", &[Series { name: "ṁ".into(), color: Color32::from_rgb(120, 190, 120), pts: &br }], Some(0.0));
+                chart(ui, size, "Fuel consumption", tl, "kg/s", &[Series { name: "ṁ".into(), color: Color32::from_rgb(120, 190, 120), pts: &br }], Some(0.0));
             }
             if n == 4 {
-                chart(ui, size, "Structure", "t, ms", "%", &[Series { name: "T/Tmelt".into(), color: Color32::from_rgb(220, 110, 90), pts: &wh }, Series { name: "σ/σy".into(), color: Color32::from_rgb(200, 190, 90), pts: &ss }], Some(0.0));
+                chart(ui, size, "Structure", tl, "%", &[Series { name: "T/Tmelt".into(), color: Color32::from_rgb(220, 110, 90), pts: &wh }, Series { name: "σ/σy".into(), color: Color32::from_rgb(200, 190, 90), pts: &ss }], Some(0.0));
             }
         });
     }
@@ -2351,7 +2632,7 @@ impl App {
                         ui.end_row();
                         last_ch = ch;
                     }
-                    let open = self.settings.unlock_all || crate::campaign_bridge::unlocked(k, &self.stars) || std::env::var("COMBUSTOR_UNLOCK").is_ok();
+                    let open = true; // experiments are a neutral list: all available
                     let cur = self.run.as_ref().map(|r| r.idx == k).unwrap_or(false);
                     ui.label(num(format!("{:02}", k + 1)).color(MUTED));
                     let t = RichText::new(crate::missions::lab_title(m.title)).color(if open { STRONG } else { FAINT });
@@ -2426,6 +2707,29 @@ impl App {
             x = r.right() + 2.0;
         }
         self.tut_rects.insert("views".into(), view_rect);
+        x += 10.0;
+        for (lbl, tip, k) in [("Fit", "Zoom to fit the geometry (Shift+F)", 0), ("1:1", "Show the whole domain (0)", 1), ("+", "Zoom in (Cmd+scroll or pinch)", 2), ("-", "Zoom out", 3)] {
+            let g = fp.layout_no_wrap(lbl.to_string(), FontId::proportional(11.5), TEXT);
+            let r = Rect::from_min_size(Pos2::new(x, header.top() + 4.0), Vec2::new(g.size().x + 14.0, header.height() - 8.0));
+            let resp = ui.interact(r, egui::Id::new(("zoombtn", k)), Sense::click()).on_hover_text(tip);
+            fp.rect_stroke(r, CornerRadius::same(2), Stroke::new(1.0_f32, BORDER), StrokeKind::Inside);
+            if resp.hovered() {
+                fp.rect_filled(r, CornerRadius::same(2), HOVER);
+            }
+            fp.galley(Pos2::new(r.left() + 7.0, r.center().y - g.size().y / 2.0), g, MUTED);
+            if resp.clicked() {
+                match k {
+                    0 => self.fit_req = true,
+                    1 => {
+                        self.zoom = 1.0;
+                        self.center = Vec2::new(W as f32 / 2.0, H as f32 / 2.0);
+                    }
+                    2 => self.zoom = (self.zoom * 1.5).min(12.0),
+                    _ => self.zoom = (self.zoom / 1.5).max(1.0),
+                }
+            }
+            x = r.right() + 3.0;
+        }
         // cursor readout
         let readout = match (self.hover, probe) {
             (Some((cx, cy)), Some(pd)) => {
@@ -2441,9 +2745,16 @@ impl App {
                 };
                 format!("{pos}    {v}")
             }
-            _ => format!("domain {} × {}   zoom {:.1}×", u.fl(W as f32), u.fl(H as f32), self.zoom),
+            _ => if header.width() > 900.0 { format!("domain {} × {}   zoom {:.1}×", u.fl(W as f32), u.fl(H as f32), self.zoom) } else { format!("zoom {:.1}×", self.zoom) },
         };
-        fp.text(Pos2::new(header.right() - 10.0, header.center().y), Align2::RIGHT_CENTER, readout, mono_font(), TEXT);
+        let room = header.right() - 10.0 - x - 8.0;
+        let mut g = fp.layout_no_wrap(readout, mono_font(), TEXT);
+        if g.size().x > room {
+            g = fp.layout_no_wrap(format!("{:.1}x", self.zoom), mono_font(), TEXT);
+        }
+        if g.size().x <= room {
+            fp.galley(Pos2::new(header.right() - 10.0 - g.size().x, header.center().y - g.size().y / 2.0), g, TEXT);
+        }
 
         // frame + axes
         fp.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0_f32, BORDER), StrokeKind::Outside);
@@ -2495,12 +2806,14 @@ impl App {
 
         // state labels (top-left inside viewport)
         let mut tags: Vec<(String, Color32)> = vec![];
-        if self.paused {
+        if self.run.is_none() {
+            tags.push(if self.paused { ("PAUSED".into(), WARN) } else { ("RUNNING".into(), GOOD) });
+        } else if self.paused {
             tags.push(("PAUSED".into(), WARN));
         }
         if let Some(r) = &self.run {
             match r.phase {
-                Phase::Build => tags.push(("SETUP".into(), MUTED)),
+                Phase::Build => tags.push(("SETUP: geometry editable".into(), MUTED)),
                 Phase::Test => tags.push((format!("RUN  t = {:.1} s", r.t), GOOD)),
                 Phase::Done => tags.push((if r.passed { "RUN COMPLETE: PASS".into() } else { "RUN COMPLETE: FAIL".into() }, if r.passed { GOOD } else { BAD })),
             }
@@ -2649,11 +2962,11 @@ impl App {
             }
             _ => {
                 let (lo, hi) = (800.0f32, 3000.0f32);
-                title("Emission", u.t_unit());
+                title("Visual", u.t_unit());
                 grad(&|t| glow_ramp(lo + t * (hi - lo)));
                 let vals: Vec<(f32, String)> = [1000.0f32, 1500.0, 2000.0, 2500.0, 3000.0].iter().map(|k| ((k - lo) / (hi - lo), format!("{:.0}", u.t(*k)))).collect();
                 ticks(&vals);
-                p.text(Pos2::new(r.left(), bar.bottom() + 20.0), Align2::LEFT_TOP, "blackbody hue\n(qualitative)", small_font(), FAINT);
+                p.text(Pos2::new(r.left(), bar.bottom() + 20.0), Align2::LEFT_TOP, "not a\nmeasurement", small_font(), FAINT);
             }
         }
     }
@@ -2768,7 +3081,7 @@ impl App {
                         }
                         ui.label(RichText::new("VIEWPORT").font(head_font()).color(MUTED));
                         ui.end_row();
-                        for (k, v) in [("Paint / draw", "Left drag"), ("Erase", "Right drag"), ("Pick material", "Alt + click"), ("Zoom", "Pinch or ⌘ + scroll"), ("Pan", "Scroll or middle drag"), ("Preferences", "⌘,")] {
+                        for (k, v) in [("Paint / draw", "Left drag"), ("Erase", "Right drag"), ("Pick material", "Alt + click"), ("Brush size", "Shift + scroll, [ and ]"), ("Zoom", "Pinch or ⌘ + scroll"), ("Pan", "Scroll or middle drag"), ("Zoom to fit geometry", "Shift + F"), ("Mix / stir powders", "M, then drag"), ("Cast / press a grain", "C, then drag"), ("Preferences", "⌘,")] {
                             ui.label(k);
                             ui.label(num(v));
                             ui.end_row();
@@ -2777,6 +3090,107 @@ impl App {
                 });
             });
             self.show_shortcuts = open;
+        }
+        if self.show_engine {
+            let mut open = true;
+            let mut build = false;
+            let mut rpm_changed = false;
+            egui::Window::new("Engine designer").open(&mut open).collapsible(false).default_width(340.0).show(ctx, |ui| {
+                use crate::engine::{Cycle, EngineParams};
+                let e = &mut self.engine_p;
+                ui.horizontal(|ui| {
+                    for (c, n) in [(Cycle::Otto, "Petrol (Otto)"), (Cycle::Diesel, "Diesel"), (Cycle::TwoStroke, "Two-stroke")] {
+                        if ui.selectable_label(e.cycle == c, n).clicked() && e.cycle != c {
+                            let n_cyl = e.cylinders;
+                            *e = match c {
+                                Cycle::Otto => EngineParams::otto(),
+                                Cycle::Diesel => EngineParams::diesel(),
+                                Cycle::TwoStroke => EngineParams::two_stroke(),
+                            }
+                            .with_cylinders(n_cyl);
+                        }
+                    }
+                });
+                ui.add(egui::Slider::new(&mut e.cylinders, 1..=4).text("cylinders"));
+                let max_bore = (240 / e.cylinders as i32 - 2 * e.wall - 4).clamp(16, 56);
+                e.bore = e.bore.clamp(16, max_bore);
+                ui.add(egui::Slider::new(&mut e.bore, 16..=max_bore).text("bore (cm)"));
+                ui.add(egui::Slider::new(&mut e.stroke, 24..=90).text("stroke (cm)"));
+                ui.add(egui::Slider::new(&mut e.clearance, 3..=20).text("clearance (cm)"));
+                ui.add(egui::Slider::new(&mut e.rod, 60.0..=200.0).text("rod length"));
+                ui.add(egui::Slider::new(&mut e.wall, 6..=24).text("wall thickness"));
+                ui.label(muted(format!("Compression ratio {:.1}:1   displacement {} cells", e.compression_ratio(), e.displacement_cells())));
+                ui.separator();
+                if ui.add(egui::Slider::new(&mut e.rev_units, 500.0..=3000.0).logarithmic(true).text("sim units / rev")).changed() {
+                    rpm_changed = true;
+                }
+                ui.add(egui::Slider::new(&mut e.ivo, 0.0..=360.0).text("intake opens (deg)"));
+                ui.add(egui::Slider::new(&mut e.ivc, 120.0..=330.0).text("intake closes"));
+                ui.add(egui::Slider::new(&mut e.evo, 360.0..=600.0).text("exhaust opens"));
+                ui.add(egui::Slider::new(&mut e.evc, 600.0..=719.0).text("exhaust closes"));
+                ui.add(egui::Slider::new(&mut e.ign_start, 300.0..=400.0).text(if e.cycle == Cycle::Diesel { "injection start" } else { "spark timing" }));
+                ui.add(egui::Slider::new(&mut e.ign_dur, 2.0..=40.0).text("duration"));
+                if e.cycle != Cycle::Diesel {
+                    ui.add(egui::Slider::new(&mut e.phi, 0.5..=1.6).text("mixture phi"));
+                }
+                ui.add(egui::Slider::new(&mut e.boost, 0.6..=2.5).text("intake pressure (atm)"));
+                egui::ComboBox::from_label("block material").selected_text(["Steel", "Aluminium", "Copper", "Titanium", "Inconel", "Ceramic"][(e.wall_mat as usize).min(5)]).show_ui(ui, |ui| {
+                    for (i, n) in ["Steel", "Aluminium", "Copper", "Titanium", "Inconel", "Ceramic"].iter().enumerate() {
+                        ui.selectable_value(&mut e.wall_mat, i as u32, *n);
+                    }
+                });
+                ui.separator();
+                if ui.button("Build and run").clicked() {
+                    build = true;
+                }
+                ui.label(muted("Rebuilds the engine from these parameters. RPM changes apply live."));
+            });
+            if build {
+                let sc = self.engine_p.build();
+                self.start_sandbox_named("Custom engine", sc);
+            }
+            if rpm_changed {
+                crate::gpu::set_engine_omega(std::f32::consts::TAU / self.engine_p.rev_units);
+            }
+            self.show_engine = open;
+        }
+        if self.show_templates {
+            let mut open = true;
+            let mut load: Option<Template> = None;
+            egui::Window::new("Templates").open(&mut open).collapsible(false).default_width(560.0).default_height(560.0).show(ctx, |ui| {
+                let ts = templates();
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for g in ["Propulsion", "Piston engines", "Flames & fires", "Structures & blast", "Chemistry", "Materials & heat transfer", "General"] {
+                        let mut items: Vec<&Template> = ts.iter().filter(|t| t.group == g).collect();
+                        if items.is_empty() {
+                            continue;
+                        }
+                        if g == "Propulsion" {
+                            items.sort_by_key(|t| PROP_SUBS.iter().position(|s| *s == t.sub).unwrap_or(9));
+                        }
+                        section(ui, &format!("{g}  ({})", items.len()));
+                        let mut last = "";
+                        for t in items {
+                            if !t.sub.is_empty() && t.sub != last {
+                                ui.add_space(4.0);
+                                ui.label(RichText::new(t.sub).size(11.0).color(FAINT));
+                                last = t.sub;
+                            }
+                            ui.horizontal(|ui| {
+                                if ui.add(egui::Button::new(RichText::new(t.title).color(STRONG)).min_size(Vec2::new(250.0, 20.0))).clicked() {
+                                    load = Some(Template { key: t.key.clone(), title: t.title, desc: t.desc, group: t.group, sub: t.sub, build: t.build });
+                                }
+                                ui.add(egui::Label::new(RichText::new(t.desc).size(11.0).color(MUTED)).wrap());
+                            });
+                        }
+                    }
+                });
+            });
+            if let Some(t) = load {
+                self.load_template(&t);
+                open = false;
+            }
+            self.show_templates = open;
         }
         if self.show_about {
             let mut open = true;
@@ -2860,6 +3274,10 @@ impl App {
         let s = &self.settings;
         a.set_volume(s.master_volume);
         a.set_muted(s.muted);
+        if let Some(l) = &self.acoustics {
+            l.set_enabled(!s.muted);
+            a.feed(l.take_frames());
+        }
         let snap = crate::audio::AudioSnapshot {
             dt,
             paused: self.paused,
@@ -2914,4 +3332,24 @@ fn lib_palette() -> crate::library::Palette {
         }
     }
     p
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    /// Every template in File > New from template must build a full-size layout without panicking and be unique.
+    #[test]
+    fn all_templates_build() {
+        let ts = templates();
+        assert!(ts.len() > 40, "only {} templates", ts.len());
+        let mut keys = std::collections::HashSet::new();
+        for t in &ts {
+            let sc = (t.build)();
+            assert_eq!(sc.meta.len(), (W * H) as usize, "{}", t.title);
+            assert!(sc.meta.iter().any(|m| *m != 0) || !sc.ops.is_empty() || t.title.contains("Blank"), "{} is empty", t.title);
+            assert!(!t.desc.is_empty(), "{} has no description", t.title);
+            assert!(keys.insert(t.key.clone()), "duplicate template key {}", t.key);
+        }
+    }
 }

@@ -7,6 +7,10 @@ struct Params {
     ign_on: u32, frame: u32, srgb: u32, sflags: u32, // sflags bit0: sparse (active-tile) stepping
     p_o2: f32, p_air: f32, cam_x: f32, cam_y: f32,
     cam_w: f32, cam_h: f32, wall_dt: f32, gravity: f32,
+    // adaptive time step (gpu.rs): dt is chosen on the GPU every step as clamp(cfl / max(|u|,|v|)+c, dt_min, dt_max),
+    // stored in STATS[13] (see sim_dt()); P.dt = dt_min is the fallback before the first step. tscale = scene time-scale
+    // factor (gpu.rs multiplies the physical time simulated per frame; informational here).
+    dt_min: f32, dt_max: f32, cfl: f32, tscale: f32,
 }
 // shape: 0 disc at (x0,y0) radius r, 1 filled box, 2 hollow box (thickness r+1), 3 line (half-width r)
 struct Op { kind: u32, shape: u32, x0: i32, y0: i32, x1: i32, y1: i32, r: i32, tile: u32, mat: u32, dir: u32, _p0: u32, _p1: u32 }
@@ -26,6 +30,13 @@ struct Op { kind: u32, shape: u32, x0: i32, y0: i32, x1: i32, y1: i32, r: i32, t
 @group(0) @binding(7) var<storage, read_write> AUX: array<u32>;
 // 0 max p, 1 max gas T, 2 max wall T/T_melt, 3 burn sum (x1000), 4 wall count, 5 max stress, 6 thrust x (x1000), 7 thrust y (x1000)
 @group(0) @binding(8) var<storage, read_write> STATS: array<atomic<u32>>;
+// STATS slots 12..15 (not cleared per frame, see gpu.rs): 12 max wave speed max(|u|,|v|)+c of the last step (f32 bits,
+// reset by `act`), 13 time step in use (f32 bits), 14 cumulative simulated time x 1e6 (wrapping u32), 15 step counter.
+const WALL_EVERY_F: f32 = 4.0;
+fn sim_dt() -> f32 {
+    let b = atomicLoad(&STATS[13]);
+    return select(P.dt, bitcast<f32>(b), b != 0u);
+}
 
 const GAMMA: f32 = 1.4;
 const RHO_MIN: f32 = 0.002;
@@ -60,6 +71,7 @@ const K_SOOT_RAD: f32 = 0.0005;
 const CS2: f32 = 0.06;
 const NU_MOL: f32 = 0.0;
 const NU_T_MAX: f32 = 1.5;
+const WALL_FRIC: f32 = 0.006;
 const PR_T: f32 = 0.7;
 // burnable solids (materials 7 wood, 8 solid propellant, 9 explosive)
 const SOLID_MASS: f32 = 10.0;     // gas-mass units in one solid cell
@@ -89,6 +101,8 @@ const RS = vec4<f32>(1.80625, 0.903125, 1.032142857, 1.111538462);
 // specific heats at constant volume per species (same units as RS): CH4 (gamma 1.31), O2 and N2 (1.40),
 // hot CO2/H2O exhaust (1.25). The mixture's gamma = 1 + R/cv follows the local composition.
 const CV = vec4<f32>(5.827, 2.258, 2.580, 4.446);
+// cp = cv + R per species
+const CPV = vec4<f32>(7.63325, 3.161125, 3.612143, 5.557538);
 
 // materials: 0 steel, 1 aluminium, 2 copper, 3 titanium, 4 inconel, 5 ceramic, 6 cooled copper,
 // 7 wood (pyrolyses into fuel gas), 8 solid propellant (self-oxidising, pressure-dependent burn), 9 explosive
@@ -130,7 +144,7 @@ fn cid(x: i32, y: i32) -> u32 {
 fn tile_of(i: u32) -> u32 { return META[i] & 0xFFu; }
 fn mat_of(i: u32) -> u32 { return min((META[i] >> 8u) & 0xFFu, 25u); }
 fn dir_of(i: u32) -> u32 { return (META[i] >> 16u) & 0xFFu; }
-fn solid_t(t: u32) -> bool { return t == 1u || t == 6u || t == 8u; }
+fn solid_t(t: u32) -> bool { return t == 1u || t == 6u || t == 8u || t == 9u || t == 10u || t == 12u || t == 13u; }
 fn is_solid(i: u32) -> bool { return solid_t(tile_of(i)); }
 
 // ---- active-region (sparse) stepping, see AUX above ----
@@ -159,6 +173,23 @@ fn wg_active(li: u32, wid: vec3<u32>) -> bool {
 // the solver's per-step domain of dependence: 2 cells per RK stage + 2 for post, so no signal can outrun it).
 @compute @workgroup_size(64)
 fn act(@builtin(global_invocation_id) g: vec3<u32>) {
+    if (g.x == 0u) {
+        // CFL-adaptive time step from the wave speed `post` measured on the previous step's result: shrinks at once,
+        // grows by at most 2 % per step (an explosion can raise the wave speed several-fold within a few steps)
+        // (sm = 0 when every tile was calm and skipped: use ambient sound speed)
+        let sm = max(bitcast<f32>(atomicLoad(&STATS[12])), 1.5);
+        atomicStore(&STATS[12], 0u);
+        let prev = atomicLoad(&STATS[13]);
+        var dt = P.dt;
+        if (P.dt_max > P.dt_min && sm == sm) {
+            dt = clamp(P.cfl / sm, P.dt_min, P.dt_max);
+            if (prev != 0u) { dt = min(dt, bitcast<f32>(prev) * 1.02); }
+            dt = max(dt, P.dt_min);
+        }
+        atomicStore(&STATS[13], bitcast<u32>(dt));
+        atomicAdd(&STATS[14], u32(dt * 1000000.0));
+        atomicAdd(&STATS[15], 1u);
+    }
     let nx = ntx();
     let ny = nty();
     if (g.x >= nx * ny) { return; }
@@ -358,6 +389,72 @@ fn minmod3(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
     return select(m, vec4<f32>(0.0), a * b <= vec4<f32>(0.0));
 }
 
+// ---- face reconstruction of the primitives ----
+// RECON 0 minmod (original), 1 MC, 2 WENO3-Z. Less numerical dissipation keeps jets collimated and shocks crisp.
+const RECON: u32 = 2u;
+fn mc_slope(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    let m = min(abs(2.0 * a), min(abs(2.0 * b), abs(0.5 * (a + b))));
+    return select(vec4<f32>(0.0), sign(a) * m, a * b > vec4<f32>(0.0));
+}
+// state at the right face of cell u0 (neighbours um, up) / at the left face of cell u0 (neighbours um, up)
+fn mc_l(um: vec4<f32>, u0: vec4<f32>, up: vec4<f32>) -> vec4<f32> { return u0 + 0.5 * mc_slope(u0 - um, up - u0); }
+fn mc_r(um: vec4<f32>, u0: vec4<f32>, up: vec4<f32>) -> vec4<f32> { return u0 - 0.5 * mc_slope(u0 - um, up - u0); }
+// WENO3-Z: left state at face i+1/2 from cells (i-1, i, i+1)
+fn weno_l(um: vec4<f32>, u0: vec4<f32>, up: vec4<f32>) -> vec4<f32> {
+    let d0 = u0 - um;
+    let d1 = up - u0;
+    let b0 = d0 * d0;
+    let b1 = d1 * d1;
+    let eps = vec4<f32>(1e-10) + 1e-5 * u0 * u0;
+    let tau = abs(b0 - b1);
+    let q0 = tau / (b0 + eps);
+    let q1 = tau / (b1 + eps);
+    let a0 = (1.0 / 3.0) * (1.0 + q0 * q0);
+    let a1 = (2.0 / 3.0) * (1.0 + q1 * q1);
+    return (a0 * (u0 + 0.5 * d0) + a1 * (u0 + 0.5 * d1)) / (a0 + a1);
+}
+// right state at face i+1/2 (seen from cell i+1 = u0) from cells (i, i+1, i+2) = (um, u0, up)
+fn weno_r(um: vec4<f32>, u0: vec4<f32>, up: vec4<f32>) -> vec4<f32> {
+    let d0 = up - u0;   // stencil {i+1, i+2}, optimal weight 1/3
+    let d1 = u0 - um;   // stencil {i, i+1}, optimal weight 2/3
+    let b0 = d0 * d0;
+    let b1 = d1 * d1;
+    let eps = vec4<f32>(1e-10) + 1e-5 * u0 * u0;
+    let tau = abs(b0 - b1);
+    let q0 = tau / (b0 + eps);
+    let q1 = tau / (b1 + eps);
+    let a0 = (1.0 / 3.0) * (1.0 + q0 * q0);
+    let a1 = (2.0 / 3.0) * (1.0 + q1 * q1);
+    return (a0 * (u0 - 0.5 * d0) + a1 * (u0 - 0.5 * d1)) / (a0 + a1);
+}
+// Open domain edges: a ghost cell behind an edge cell. Outflow (subsonic): static pressure of the ambient atmosphere,
+// everything else zero-gradient (a pressure outlet: waves leave without bouncing back and the box does not slowly
+// pressurise). Supersonic outflow: pure zero-gradient. Inflow: ambient air (entrainment), velocity kept.
+const OPEN_BC: u32 = 2u;
+// weak pressure relaxation of the outflow ghost towards 1 atm (0 = pure transmissive, 1 = pressure release)
+const OPEN_SIGMA: f32 = 0.05;
+fn open_ghost(q: Prim, un: f32) -> Prim {
+    var o = q;
+    if (un > 0.0) {
+        let rho = q.r.x + q.r.y + q.r.z + q.r.w;
+        let c = sqrt((1.0 + gm1_r(q.r)) * q.w.z / max(rho, RHO_MIN));
+        if (un < c) {
+            let pg = q.w.z + OPEN_SIGMA * (1.0 - q.w.z);
+            o.r = q.r * (pg / q.w.z);
+            o.w.z = pg;
+        }
+    } else if (OPEN_BC == 1u) {
+        o.r = vec4<f32>(0.0, 0.233, 0.767, 0.0);
+        o.w.z = 1.0;
+        o.w.w = 0.0;
+    }
+    return o;
+}
+
+fn phys_ok(q: Prim) -> bool {
+    return all(q.r >= vec4<f32>(0.0)) && q.w.z > P_MIN && q.w.w >= 0.0 && (q.r.x + q.r.y + q.r.z + q.r.w) > RHO_MIN;
+}
+
 fn hllc(l: Prim, r: Prim) -> S {
     let rl = l.r.x + l.r.y + l.r.z + l.r.w;
     let rr = r.r.x + r.r.y + r.r.z + r.r.w;
@@ -417,15 +514,30 @@ fn face_p(sap: bool, pap: Prim, sa: bool, wa: Prim, sb: bool, wb: Prim, sbn: boo
     } else {
         l = wa;
         r = wb;
-        let dr = wb.r - wa.r;
-        let dw = wb.w - wa.w;
-        if (!sap) {
-            l.r += 0.5 * minmod4(wa.r - pap.r, dr);
-            l.w += 0.5 * minmod3(wa.w - pap.w, dw);
-        }
-        if (!sbn) {
-            r.r -= 0.5 * minmod4(dr, pbn.r - wb.r);
-            r.w -= 0.5 * minmod3(dw, pbn.w - wb.w);
+        if (RECON == 0u) {
+            let dr = wb.r - wa.r;
+            let dw = wb.w - wa.w;
+            if (!sap) {
+                l.r += 0.5 * minmod4(wa.r - pap.r, dr);
+                l.w += 0.5 * minmod3(wa.w - pap.w, dw);
+            }
+            if (!sbn) {
+                r.r -= 0.5 * minmod4(dr, pbn.r - wb.r);
+                r.w -= 0.5 * minmod3(dw, pbn.w - wb.w);
+            }
+        } else {
+            // limiter-free-smooth reconstruction of the primitives (WENO3-Z or MC), first order next to solids,
+            // falls back to the cell values wherever a face state would be unphysical
+            if (!sap) {
+                if (RECON == 1u) { l.r = mc_l(pap.r, wa.r, wb.r); l.w = mc_l(pap.w, wa.w, wb.w); }
+                else { l.r = weno_l(pap.r, wa.r, wb.r); l.w = weno_l(pap.w, wa.w, wb.w); }
+                if (!phys_ok(l)) { l = wa; }
+            }
+            if (!sbn) {
+                if (RECON == 1u) { r.r = mc_r(wa.r, wb.r, pbn.r); r.w = mc_r(wa.w, wb.w, pbn.w); }
+                else { r.r = weno_r(wa.r, wb.r, pbn.r); r.w = weno_r(wa.w, wb.w, pbn.w); }
+                if (!phys_ok(r)) { r = wb; }
+            }
         }
     }
     let lw = l.w;
@@ -470,13 +582,21 @@ fn rk_stage(lid: vec3<u32>, wid: vec3<u32>, stage: u32) {
         let hy = k / RK_HX;
         // corners of the halo are never used by a face stencil
         if ((hx < 2u || hx >= RK_TX + 2u) && (hy < 2u || hy >= RK_TY + 2u)) { SH_S[k] = 1u; continue; }
-        let gi = cid(ox + i32(hx), oy + i32(hy));
+        let gx0 = ox + i32(hx);
+        let gy0 = oy + i32(hy);
+        let gi = cid(gx0, gy0);
         let sol = is_solid(gi);
         SH_S[k] = u32(sol);
         if (!sol) {
             var stg = stage;
-            if (stg == 1u && !act_xy(ox + i32(hx), oy + i32(hy))) { stg = 0u; }
-            let p = ldprim(gi, stg);
+            if (stg == 1u && !act_xy(gx0, gy0)) { stg = 0u; }
+            var p = ldprim(gi, stg);
+            if (OPEN_BC != 0u && (gx0 < 0 || gy0 < 0 || gx0 >= i32(P.w) || gy0 >= i32(P.h))) {
+                // ghost cell outside the domain: non-reflecting pressure outlet / ambient entrainment
+                var un = p.w.y;
+                if (gx0 < 0) { un = -p.w.x; } else if (gx0 >= i32(P.w)) { un = p.w.x; } else if (gy0 < 0) { un = -p.w.y; }
+                p = open_ghost(p, un);
+            }
             SH_A[k] = p.r;
             SH_B[k] = p.w;
         }
@@ -530,7 +650,7 @@ fn rk_stage(lid: vec3<u32>, wid: vec3<u32>, stage: u32) {
             if (gy == 0u) { fin = S(fin.a + ft.a, fin.b + ft.b); }
             if (gy == P.h - 1u) { fin = S(fin.a - fb.a, fin.b - fb.b); }
         }
-        let h = 0.5 * P.dt;
+        let h = 0.5 * sim_dt();
         let acc = vec4<f32>(h * (fin.a.x + fin.a.y + fin.a.z + fin.a.w), h * (fin.b.z + Q_FUEL * fin.a.x + 2.0 * Q_FUEL * fin.b.w), 0.0, 0.0);
         workgroupBarrier();
         acc_flush(li, wid.y * 64u + wid.x + stage * 7777u, acc);
@@ -545,11 +665,12 @@ fn rk_stage(lid: vec3<u32>, wid: vec3<u32>, stage: u32) {
     }
     let la = fl.a - fr.a + ft.a - fb.a;
     let lb = fl.b - fr.b + ft.b - fb.b;
+    let dt = sim_dt();
     if (stage == 0u) {
-        st1(i, floor_state(S(s0.a + P.dt * la, s0.b + P.dt * lb)));
+        st1(i, floor_state(S(s0.a + dt * la, s0.b + dt * lb)));
     } else {
         let s1 = ld1(i);
-        st2(i, floor_state(S(0.5 * (s0.a + s1.a + P.dt * la), 0.5 * (s0.b + s1.b + P.dt * lb))));
+        st2(i, floor_state(S(0.5 * (s0.a + s1.a + dt * la), 0.5 * (s0.b + s1.b + dt * lb))));
     }
 }
 
@@ -593,10 +714,14 @@ fn post_turb(lid: vec3<u32>, wid: vec3<u32>) {
         let c = (k / PO_NX + 1u) * PO_VX + k % PO_NX + 1u;
         var nu = 0.0;
         if (SH_VS[c] == 0u) {
-            let ue = SH_V[c + 1u];
-            let uw = SH_V[c - 1u];
-            let us = SH_V[c + PO_VX];
-            let un = SH_V[c - PO_VX];
+            // wall-modelled: across a solid face the velocity gradient is taken as zero (the wall shear comes from
+            // WALL_FRIC), otherwise the no-slip jump u/dx makes the eddy viscosity ~40x too large in the nozzle boundary layer
+            let u0 = SH_V[c];
+            let wm = WALL_FRIC > 0.0;
+            let ue = select(SH_V[c + 1u], u0, wm && SH_VS[c + 1u] != 0u);
+            let uw = select(SH_V[c - 1u], u0, wm && SH_VS[c - 1u] != 0u);
+            let us = select(SH_V[c + PO_VX], u0, wm && SH_VS[c + PO_VX] != 0u);
+            let un = select(SH_V[c - PO_VX], u0, wm && SH_VS[c - PO_VX] != 0u);
             let dx = 0.5 * (ue - uw);
             let dy = 0.5 * (us - un);
             let sxy = dy.x + dx.y;
@@ -612,21 +737,23 @@ fn post_turb(lid: vec3<u32>, wid: vec3<u32>) {
 @compute @workgroup_size(16, 8)
 fn post(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
     let li = lid.y * RK_TX + lid.x;
-    if (li == 0u) { atomicStore(&WG_FL, 0u); }
+    if (li == 0u) { atomicStore(&WG_FL, 0u); atomicStore(&WG_SM, 0u); }
     if (!wg_active(li, wid)) { return; }
     post_turb(lid, wid);
     let acc = post_cell(lid, wid);
     workgroupBarrier();
-    //ACCX
+    acc_flush(li, wid.y * 64u + wid.x + 99991u, acc);
     if (li == 0u) {
         let f = atomicLoad(&WG_FL);
         let t = wid.y * ntx() + wid.x;
         AUX[t] = select(1u, 0u, (f & 1u) != 0u);
         AUX[AUX_SOL + t] = f >> 1u;
+        atomicMax(&STATS[12], atomicLoad(&WG_SM));
     }
 }
 // post's per-workgroup flags: bit0 not calm, bit1 has wall, bit2 has matter
 var<workgroup> WG_FL: atomic<u32>;
+var<workgroup> WG_SM: atomic<u32>; // max wave speed (f32 bits, positive floats order like u32)
 
 // Per-cell body of `post`; returns this cell's (boundary mass, boundary energy, source mass, source energy).
 fn post_cell(lid: vec3<u32>, wid: vec3<u32>) -> vec4<f32> {
@@ -654,17 +781,37 @@ fn post_cell(lid: vec3<u32>, wid: vec3<u32>) -> vec4<f32> {
         st0(i, ns);
         return bnd_acc(ns, s);
     }
+    if (t == 14u || t == 15u) {
+        // timed fuel injector (open) or premixed intake charge (phi = mat / 10, throttle = air feed pressure)
+        var yk = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+        var p0 = P.p_fuel;
+        if (t == 15u) {
+            let phi = max(f32((META[i] >> 8u) & 0xFFu) / 10.0, 0.1);
+            let yf = 1.0 / (1.0 + 17.2 / phi);
+            yk = vec4<f32>(yf, 0.233 * (1.0 - yf), 0.767 * (1.0 - yf), 0.0);
+            p0 = P.p_air;
+        }
+        let ns = inlet_state(yk, p0, 1.0, s);
+        st0(i, ns);
+        return bnd_acc(ns, s);
+    }
     if (t == 7u) {
         let ns = vent_state(s);
         st0(i, ns);
         return bnd_acc(ns, s);
     }
     let s_in = s;
-    let dt = P.dt;
+    let dt = sim_dt();
     let rc = max(rho_s(s), RHO_MIN);
     let tc = temp(s);
     let spd = sqrt(s.b.x * s.b.x + s.b.y * s.b.y) / rc;
     let pc = pres(s);
+    {
+        // largest wave speed max(|u|,|v|) + c of this cell (next step's CFL)
+        let cs = sqrt((1.0 + gm1(s)) * pc / rc);
+        let lam = max(abs(s.b.x), abs(s.b.y)) / rc + cs;
+        atomicMax(&WG_SM, bitcast<u32>(lam));
+    }
     let zs = s.b.w;
     let prod_c = s.a.w;
     var da = vec4<f32>(0.0);
@@ -672,6 +819,7 @@ fn post_cell(lid: vec3<u32>, wid: vec3<u32>) -> vec4<f32> {
     var dz = 0.0;
     var dm = vec2<f32>(0.0);
     var igniter = false;
+    var spark_on = false;
     let nu_c = SH_NU[lc];
     let uc = vec2<f32>(s.b.x, s.b.y) / rc;
     let zc = s.b.w / rc;
@@ -681,6 +829,7 @@ fn post_cell(lid: vec3<u32>, wid: vec3<u32>) -> vec4<f32> {
         if (j == i) { continue; }
         let tj = tile_of(j);
         if (tj == 6u) { igniter = true; }
+        if (tj == 12u && spark_active(mat_of(j))) { spark_on = true; }
         if (tj == 1u || tj == 8u) {
             let m = mat_of(j);
             let tw = WALL[j].x;
@@ -704,18 +853,29 @@ fn post_cell(lid: vec3<u32>, wid: vec3<u32>) -> vec4<f32> {
                 }
             }
         }
-        if (tj == 1u || tj == 6u || tj == 8u) {
-            // wall friction (no-slip)
-            dm -= dt * (NU_MOL + nu_c) * rc * uc;
+        if (solid_t(tj)) {
+            // wall friction: one cell cannot resolve a boundary layer, so the wall shear is a log-law style quadratic drag
+            // tau = Cf/2 rho |u| u (Cf = 2 WALL_FRIC) instead of no-slip with the eddy viscosity (which was ~40x stronger at
+            // 70 m/s and choked nozzles/jets); WALL_FRIC < 0 restores the old no-slip form
+            if (WALL_FRIC > 0.0) {
+                dm -= rc * uc * min(dt * WALL_FRIC * length(uc), 0.4);
+            } else {
+                dm -= dt * (NU_MOL + nu_c) * rc * uc;
+            }
             continue;
         }
         let sn = ld2a(j);
         let rn = max(rho_s(sn), RHO_MIN);
         let nu_f = 0.5 * (nu_c + SH_NU[u32(i32(lc) + NU_OFF[k])]);
         let rbar = 0.5 * (rc + rn);
-        de += dt * min(rc, rn) * (K_COND + 2.8 * nu_f / PR_T) * (temp(sn) - tc);
+        let tn_g = temp(sn);
+        de += dt * min(rc, rn) * (K_COND + 2.8 * nu_f / PR_T) * (tn_g - tc);
         let dif = dt * (D_SPEC + nu_f / PR_T) * rbar;
-        da += dif * (sn.a / rn - s.a / rc);
+        let dj = dif * (sn.a / rn - s.a / rc);
+        da += dj;
+        // species diffusion carries enthalpy (sum_k J_k cp_k T_face): without it a cell that swaps fuel (cv 5.8) for
+        // O2 (cv 2.3) at fixed energy jumps in temperature (hot spots next to injector rows)
+        de += dot(dj, CPV) * 0.5 * (tc + tn_g);
         dz += dif * (sn.b.w / rn - zc);
         dm += dt * (NU_MOL + nu_f) * rbar * (vec2<f32>(sn.b.x, sn.b.y) / rn - uc);
     }
@@ -748,7 +908,7 @@ fn post_cell(lid: vec3<u32>, wid: vec3<u32>) -> vec4<f32> {
         let ke1 = 0.5 * (s.b.x * s.b.x + s.b.y * s.b.y) / rho;
         s.b.z += ke1 - ke0;
     }
-    if (igniter && P.ign_on != 0u) {
+    if ((igniter && P.ign_on != 0u) || spark_on) {
         let tt = temp(s);
         if (tt < T_IGNITER) { s = set_temp(s, tt + (T_IGNITER - tt) * min(3.0 * dt, 1.0)); }
     }
@@ -811,7 +971,13 @@ fn post_cell(lid: vec3<u32>, wid: vec3<u32>) -> vec4<f32> {
 // Gas-mass production rate per exposed face of a burning solid.
 fn solid_burn_rate(m: u32, tw: f32, p: f32) -> f32 {
     if (m == 7u && tw > 1.8) { return K_WOOD * exp(-T_WOOD / tw); }
-    if (m == 8u && tw > T_PROP_IGN) { return K_PROP * pow(max(p, 0.1), N_PROP); }
+    // Saint-Robert / Vieille r = a p^n for the generic solid propellant (wall material 8): n = 0.35 (APCP-class,
+    // stable: dp_c/dp ~ 1/(1-n)); `a` is set so the scene's bore (Kn = Ab/At ~ 15) settles near 12-18 atm
+    // (the old 0.2 gave 25+ atm and burst the 16 atm-class case; a 6-cell steel case holds ~24 atm gauge). Above ~40 atm the surface cannot out-run the chamber.
+    if (m == 8u && tw > T_PROP_IGN) {
+        let pc = clamp(p, 0.1, 80.0);
+        return 0.10 * pow(pc, 0.35) / (1.0 + pow(pc / 40.0, 2.0));
+    }
     return 0.0;
 }
 
@@ -863,9 +1029,9 @@ fn wall_heat(i: u32, x: i32, y: i32, m: u32, tw: f32, dt: f32) -> WallHeat {
             let ej = select(mat_of(j), elem_of(j), tj == 8u);
             dq += dt * min(cond, m_cond(ej)) * (tn - tw);
             worst = max(worst, abs(tn - tw));
-        } else if (tj == 6u) {
-            // igniters heat touching solids directly (pyrotechnic igniter / glow plug contact)
-            if (P.ign_on != 0u && m >= 7u && tw < T_IGNITER) { dq += dt * 2.0 * (T_IGNITER - tw); }
+        } else if (solid_t(tj)) {
+            // igniters heat touching solids directly (pyrotechnic igniter / glow plug contact); other solids are inert
+            if (tj == 6u && P.ign_on != 0u && m >= 7u && tw < T_IGNITER) { dq += dt * 2.0 * (T_IGNITER - tw); }
         } else {
             exposed += 1.0;
             let gs = ld2a(j);
@@ -903,7 +1069,7 @@ fn wall_m(@builtin(global_invocation_id) g: vec3<u32>, @builtin(workgroup_id) wi
     let y = i32(g.y);
     let m = mat_of(i);
     let w = WALL[i];
-    let dt = P.wall_dt;
+    let dt = sim_dt() * WALL_EVERY_F;
     let hh = wall_heat(i, x, y, m, w.x, dt);
     let ex = max(hh.exposed, 1.0);
     WALL[P.w * P.h + i] = matter_update(i, x, y, m, hh.ntw, w.w, hh.exposed, hh.gp_sum / ex, hh.gp_max, hh.gt_max, hh.o2_sum / ex, dt);
@@ -922,7 +1088,7 @@ fn wall(@builtin(global_invocation_id) g: vec3<u32>, @builtin(workgroup_id) wid:
     let n = P.w * P.h;
     let w = WALL[i];
     let m = mat_of(i);
-    let dt = P.wall_dt;
+    let dt = sim_dt() * WALL_EVERY_F;
     let hh = wall_heat(i, x, y, m, w.x, dt);
     let ntw = hh.ntw;
     let exposed = hh.exposed;
@@ -974,7 +1140,7 @@ fn wall(@builtin(global_invocation_id) g: vec3<u32>, @builtin(workgroup_id) wid:
                 let step_len = length(vec2<f32>(st));
                 var kx = x + st.x;
                 var ky = y + st.y;
-                for (var k = 0; k < 12; k++) {
+                for (var k = 0; k < 28; k++) {
                     if (kx < 0 || ky < 0 || kx >= i32(P.w) || ky >= i32(P.h)) { break; }
                     let ki = u32(ky) * P.w + u32(kx);
                     let tk = tile_of(ki);
@@ -1025,7 +1191,20 @@ fn commit(@builtin(global_invocation_id) g: vec3<u32>, @builtin(workgroup_id) wi
         let wv = WALL[i];
         let fl = wv.y;
         if (fl > 2.9) {
-            // molten metal solidified back into its metal (thermite iron -> steel)
+            // molten metal solidified. A puddle that freezes against a wall welds back onto it as the same wall
+            // material (a pour that refills its own hole); a free droplet (nothing solid to bond to), and thermite
+            // iron (z >= 10) in any case, freezes as granular iron shot / slag.
+            var welded = false;
+            for (var k = 0; k < 4; k++) {
+                let o = OFF[k];
+                let j = cid(x + o.x, y + o.y);
+                if (j != i && tile_of(j) == 1u) { welded = true; }
+            }
+            if (wv.z >= 10.0 || !welded) {
+                META[i] = MATTER | (25u << 8u);
+                WALL[i] = vec4<f32>(wv.x, 0.0, 0.0, 1.0);
+                return;
+            }
             let orig = select(0u, u32(wv.z), wv.z >= 0.5 && wv.z < 7.0);
             META[i] = 1u | (orig << 8u);
             WALL[i] = vec4<f32>(wv.x, 0.0, 0.0, 1.0);
@@ -1155,6 +1334,12 @@ fn apply_ops(@builtin(global_invocation_id) g: vec3<u32>) {
                 mt = 8u | (el << 8u) | ((o.dir & 1u) << 16u);
                 w = vec4<f32>(E_TINIT[min(el, N_ELEM - 1u)], 0.0, 0.0, 1.0);
             }
+        } else if (o.kind == 10u) {
+            // preheat: solids and matter in the shape start at least at T = mat / 10 (units of 300 K); matter cells are marked settled
+            if (cur == 1u || cur == 8u) {
+                w.x = max(w.x, f32(o.mat) * 0.1);
+                if (cur == 8u) { w.y = max(w.y, 0.1); }
+            }
         } else if (o.kind == 9u) {
             // cast / press: matter cells in the shape become a packed grain (immobile, surface-burning)
             if (cur == 8u) { mt = mt | (1u << 16u); }
@@ -1220,7 +1405,7 @@ fn reaction_rate(s: S, tt: f32, nu_t: f32) -> f32 {
 fn burn_rate(s: S) -> f32 {
     let tt = temp(s);
     if (tt < T_CHEM_MIN) { return 0.0; }
-    return min(reaction_rate(s, tt, 0.0) * diss_factor(tt), s.a.x / P.dt);
+    return min(reaction_rate(s, tt, 0.0) * diss_factor(tt), s.a.x / sim_dt());
 }
 
 // Workgroup-level partial results of `stats` (slots as in STATS): one global atomic per workgroup and slot

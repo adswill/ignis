@@ -30,6 +30,7 @@ const N: u64 = (W as u64) * (H as u64);
 const SIM_SRC: &str = include_str!("../src/sim.wgsl");
 const MATTER_SRC: &str = include_str!("../src/matter.wgsl");
 const VIS_SRC: &str = include_str!("../src/vis.wgsl");
+const LOOK_SRC: &str = include_str!("../src/matter_look.wgsl");
 const GPU_RS: &str = include_str!("../src/gpu.rs");
 
 fn env<T: std::str::FromStr>(k: &str, d: T) -> T {
@@ -134,7 +135,7 @@ struct Sim {
 
 impl Sim {
     fn new(device: &wgpu::Device) -> Sim {
-        let src = format!("{}\n{}\n{}", SIM_SRC, MATTER_SRC, VIS_SRC);
+        let src = format!("{}\n{}\n{}\n{}", SIM_SRC, MATTER_SRC, VIS_SRC, LOOK_SRC);
         let binds = parse_bindings(&src);
         let flux = (((W + 1) * H + W * (H + 1)) as u64) * 32;
         let size_of = |name: &str| -> u64 {
@@ -620,7 +621,7 @@ fn finish(name: &str, out_dir: &str, rec: &Rec, dropped: u32, t_start: std::time
 
 fn main() {
     let scenes: Vec<String> = std::env::var("SCENES").unwrap_or_else(|_| "flare,campfire,jet,rocket,demo,chem".into()).split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-    let out_dir = std::env::var("OUT").unwrap_or_else(|_| "/tmp/ignis-acoustics".into());
+    let out_dir = std::env::var("OUT").unwrap_or_else(|_| "/tmp/ignis".into());
     let _ = std::fs::create_dir_all(&out_dir);
     let secs: f32 = env("SECS", 12.0);
     let speed: f32 = env("SPEED", 1.0);

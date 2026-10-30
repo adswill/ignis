@@ -24,11 +24,15 @@ pub struct Scene {
     pub o2_p: f32,
     /// edits applied right after loading (e.g. pre-filled gas)
     pub ops: Vec<Op>,
+    /// intake / air feed pressure (atm)
+    pub p_air: f32,
+    /// reciprocating-engine configuration image for the GPU (engine.rs); empty = no engine
+    pub engine: Vec<u32>,
 }
 
 impl Scene {
     pub fn empty() -> Self {
-        Scene { meta: vec![0; (W * H) as usize], inlet_p: 3.0, o2_p: 3.0, ops: vec![] }
+        Scene { meta: vec![0; (W * H) as usize], inlet_p: 3.0, o2_p: 3.0, ops: vec![], p_air: 2.0, engine: vec![] }
     }
 
     pub fn put(&mut self, x: i32, y: i32, tile: u32, mat: u32, dir: u32) {
@@ -327,20 +331,23 @@ impl Scene {
         s
     }
 
-    /// Solid rocket motor: steel case, hollow propellant grain, nozzle, igniter at the head end.
+    /// Solid rocket motor: 6-cell steel case, hollow (core-burning) propellant grain, converging-diverging nozzle with a
+    /// tungsten throat insert behind an inconel shell, lit by a one-shot torch in the bore (a permanent igniter tile
+    /// would hold the head-end gas at 3000 K for the whole burn and dominate Tmax).
     pub fn solid_rocket() -> Self {
         let mut s = Scene::empty();
         let cy = (H / 2) as i32;
         let (x0, x1) = (70, 190);
         let case_h = 26;
+        let wall = 6; // 6 cells = 24 atm-class case (M_STR steel 4 per cell)
         for x in x0..=x1 {
-            for t in 0..4 {
+            for t in 0..wall {
                 s.put(x, cy - case_h - t, WALL, STEEL, 0);
                 s.put(x, cy + case_h + t, WALL, STEEL, 0);
             }
         }
-        for x in x0 - 4..x0 {
-            for y in cy - case_h - 3..=cy + case_h + 3 {
+        for x in x0 - 6..x0 {
+            for y in cy - case_h - wall + 1..=cy + case_h + wall - 1 {
                 s.put(x, y, WALL, STEEL, 0);
             }
         }
@@ -352,17 +359,20 @@ impl Scene {
                 }
             }
         }
-        // converging-diverging nozzle
+        // converging-diverging nozzle: inconel shell, tungsten insert on the gas side of the throat region
         for x in x1..x1 + 50 {
             let h = if x < x1 + 18 { 25 - (x - x1) } else { 7 + ((x - x1 - 18) as f32 * 0.45) as i32 };
-            for t in 0..5 {
-                s.put(x, cy - h - 1 - t, WALL, INCONEL, 0);
-                s.put(x, cy + h + t, WALL, INCONEL, 0);
+            let ins = if (x1 + 8..x1 + 30).contains(&x) { 2 } else { 0 };
+            for t in 0..6 {
+                s.put(x, cy - h - 1 - t - ins, WALL, INCONEL, 0);
+                s.put(x, cy + h + t + ins, WALL, INCONEL, 0);
+            }
+            for t in 0..ins {
+                s.put(x, cy - h - 1 - t, MATTER, 85, 0);
+                s.put(x, cy + h + t, MATTER, 85, 0);
             }
         }
-        for y in cy - 7..=cy + 7 {
-            s.put(x0, y, IGNITER, 0, 0);
-        }
+        s.torch(x0 + 8, cy, 10); // kind 5 also sets the touched grain surface to 1200 K
         s
     }
 
@@ -454,18 +464,34 @@ impl Scene {
         self.put(x, y, MATTER, el, 1);
     }
 
-    /// 3x5 digit glyph in steel (labels for the material board).
-    fn digit(&mut self, d: u32, x0: i32, y0: i32) {
-        const G: [[u8; 5]; 10] = [
+    /// 3x5 glyph in steel (digits and A-Z; lowercase is upper-cased; unknown = blank). Labels for the material board.
+    fn glyph(&mut self, ch: char, x0: i32, y0: i32) {
+        const G: [[u8; 5]; 36] = [
             [7, 5, 5, 5, 7], [2, 6, 2, 2, 7], [7, 1, 7, 4, 7], [7, 1, 7, 1, 7], [5, 5, 7, 1, 1],
             [7, 4, 7, 1, 7], [7, 4, 7, 5, 7], [7, 1, 1, 1, 1], [7, 5, 7, 5, 7], [7, 5, 7, 1, 7],
+            [2, 5, 7, 5, 5], [6, 5, 6, 5, 6], [3, 4, 4, 4, 3], [6, 5, 5, 5, 6], [7, 4, 6, 4, 7], [7, 4, 6, 4, 4],
+            [3, 4, 5, 5, 3], [5, 5, 7, 5, 5], [7, 2, 2, 2, 7], [1, 1, 1, 5, 2], [5, 5, 6, 5, 5], [4, 4, 4, 4, 7],
+            [5, 7, 7, 5, 5], [6, 5, 5, 5, 5], [2, 5, 5, 5, 2], [6, 5, 6, 4, 4], [2, 5, 5, 7, 3], [6, 5, 6, 5, 5],
+            [3, 4, 2, 1, 6], [7, 2, 2, 2, 2], [5, 5, 5, 5, 7], [5, 5, 5, 5, 2], [5, 5, 7, 7, 5], [5, 5, 2, 5, 5],
+            [5, 5, 2, 2, 2], [7, 1, 2, 4, 7],
         ];
-        for (r, row) in G[d as usize].iter().enumerate() {
-            for c in 0..3 {
-                if row >> (2 - c) & 1 == 1 {
-                    self.put(x0 + c, y0 + r as i32, WALL, STEEL, 0);
+        let c = ch.to_ascii_uppercase();
+        let k = if c.is_ascii_digit() { c as usize - '0' as usize } else if c.is_ascii_uppercase() { 10 + c as usize - 'A' as usize } else { return };
+        for (r, row) in G[k].iter().enumerate() {
+            for cc in 0..3 {
+                if row >> (2 - cc) & 1 == 1 {
+                    self.put(x0 + cc, y0 + r as i32, WALL, STEEL, 0);
                 }
             }
+        }
+    }
+
+    /// Centre a text label (steel glyphs) on `cx`.
+    fn label(&mut self, text: &str, cx: i32, y0: i32) {
+        let n = text.chars().count() as i32;
+        let x0 = cx - (n * 4 - 1) / 2;
+        for (k, ch) in text.chars().enumerate() {
+            self.glyph(ch, x0 + 4 * k as i32, y0);
         }
     }
 
@@ -490,16 +516,23 @@ impl Scene {
                 s.put(x0 + 35, y, WALL, STEEL, 0);
             }
             let id = 10 + k;
-            // label above the tray
-            let (d1, d2) = (id / 10, id % 10);
+            // label above the tray: element code (name), e.g. "TNT"
             if id < 92 {
-                s.digit(d1, x0 + 13, y0 + 2);
-                s.digit(d2, x0 + 18, y0 + 2);
+                let code = crate::elements::MATTER.iter()
+                    .find(|e| matches!(e.tool, crate::elements::Tool::Matter(m) if m == id))
+                    .map(|e| e.code).unwrap_or("?");
+                s.label(code, x0 + 18, y0 + 2);
+            } else {
+                s.label(if id == 92 { "CAST" } else { "APCP" }, x0 + 18, y0 + 2);
             }
             let (fx0, fx1) = (x0 + 1, x0 + 34);
-            let top = floor_y - 14;
+            let mid = (fx0 + fx1) as f32 * 0.5;
+            let liquid = matches!(id, 19..=24 | 29..=34 | 36 | 43..=45 | 54 | 55 | 61 | 63 | 66 | 67 | 80..=84);
+            let solid = matches!(id, 26 | 35 | 38 | 49..=53 | 56 | 62 | 65 | 76 | 77 | 85..=91);
             for x in fx0..=fx1 {
-                for y in top..floor_y {
+                // powders sit in a heap (angle of repose ~45 degrees), liquids lie flat, solids are pressed blocks
+                let hgt = if id >= 92 || solid { 14 } else if liquid { 12 } else { (17.0 - (x as f32 - mid).abs() * 0.95).clamp(1.0, 16.0) as i32 };
+                for y in floor_y - hgt..floor_y {
                     let h = ((x * 73856093) ^ (y * 19349663)) as u32 % 100;
                     if id < 92 {
                         s.put(x, y, MATTER, id, 0);
@@ -508,6 +541,75 @@ impl Scene {
                     } else {
                         s.cast(x, y, if h < 70 { 16 } else if h < 86 { 15 } else { 66 }); // APCP, cast
                     }
+                }
+            }
+        }
+        s
+    }
+
+    /// The engine, cryogenic and construction materials (ids 92-109) in their own trays, 6 columns x 3 rows.
+    pub fn material_board2() -> Self {
+        let mut s = Scene::empty();
+        let (cw, ch) = (84, 90);
+        let (ox, oy) = (4, 6);
+        for k in 0..18u32 {
+            let (col, row) = ((k % 6) as i32, (k / 6) as i32);
+            let x0 = ox + col * cw;
+            let y0 = oy + row * ch;
+            let floor_y = y0 + ch - 6;
+            for x in x0..x0 + 78 {
+                s.put(x, floor_y, WALL, STEEL, 0);
+                s.put(x, floor_y + 1, WALL, STEEL, 0);
+            }
+            for y in floor_y - 50..floor_y {
+                s.put(x0, y, WALL, STEEL, 0);
+                s.put(x0 + 77, y, WALL, STEEL, 0);
+            }
+            let id = 92 + k;
+            let code = crate::elements::MATTER.iter()
+                .find(|e| matches!(e.tool, crate::elements::Tool::Matter(m) if m == id))
+                .map(|e| e.code).unwrap_or("?");
+            s.label(code, x0 + 39, y0 + 4);
+            let liquid = matches!(id, 92..=95 | 107..=109);
+            let solid = matches!(id, 96 | 99 | 100 | 102 | 105 | 106);
+            let mid = (x0 + 39) as f32;
+            for x in x0 + 1..x0 + 77 {
+                let hgt = if solid { 28 } else if liquid { 22 } else { (36.0 - (x as f32 - mid).abs() * 0.9).clamp(2.0, 34.0) as i32 };
+                for y in floor_y - hgt..floor_y {
+                    s.put(x, y, MATTER, id, 0);
+                }
+            }
+        }
+        s
+    }
+
+    /// Mixing review scene: the same two powders side by side (unstirred), as a 65:35 per-cell blend (what the Stir tool
+    /// and the composition brush produce) and a three-component black-powder blend. Look-dev / screenshot scene.
+    pub fn mix_demo() -> Self {
+        let mut s = Scene::empty();
+        let fl = 170;
+        for (k, name) in ["SEPARATE", "STIRRED", "BLACK POWDER"].iter().enumerate() {
+            let x0 = 14 + k as i32 * 166;
+            for x in x0..x0 + 154 {
+                s.put(x, fl, WALL, STEEL, 0);
+                s.put(x, fl + 1, WALL, STEEL, 0);
+            }
+            for y in fl - 44..fl {
+                s.put(x0, y, WALL, STEEL, 0);
+                s.put(x0 + 153, y, WALL, STEEL, 0);
+            }
+            s.label(name, x0 + 77, fl - 60);
+            for x in x0 + 1..x0 + 153 {
+                let mid = x0 as f32 + 76.5;
+                let hgt = (34.0 - (x as f32 - mid).abs() * 0.5).clamp(2.0, 34.0) as i32;
+                for y in fl - hgt..fl {
+                    let h = ((x * 73856093) ^ (y * 19349663)) as u32 % 100;
+                    let id = match k {
+                        0 => if x < x0 + 77 { 13 } else { 14 },
+                        1 => if h < 65 { 13 } else { 14 },
+                        _ => if h < 75 { 13 } else if h < 90 { 11 } else { 12 },
+                    };
+                    s.put(x, y, MATTER, id, 0);
                 }
             }
         }
@@ -537,7 +639,13 @@ impl Scene {
             // insulation: phenolic liner in the free chamber, tungsten insert from the convergence on (a bare steel
             // case melts in a 2500 K flow)
             let lin = 2;
+            // CATO scene: a 4-cell void in the insulation (a debonded liner) lets the case see the chamber gas
+            // (the case load is read from touching GAS cells only, so a fully lined case can never burst)
+            let void = kind == 2 && (164..168).contains(&x);
             for l in 0..lin {
+                if void {
+                    continue;
+                }
                 let el = if x >= xn0 { 85 } else { 87 };
                 s.put(x, cy - half - 1 - l, MATTER, el, 0);
                 s.put(x, cy + half + l, MATTER, el, 0);
@@ -582,12 +690,88 @@ impl Scene {
         // ignition: a one-shot torch against the free surface (core: inside the bore); a permanent igniter tile would
         // keep the gas at 3000 K for the whole burn
         let (tx, tr) = if kind == 1 { (end - 12, 2) } else { (end + 2, 3) };
+        if kind == 3 {
+            // loose powder is lit by a pyrotechnic igniter pad touching the surface (a gas flash is not enough)
+            for y in cy - 2..=cy + 2 {
+                s.put(end, y, IGNITER, 0, 0);
+            }
+        }
         s.ops.push(Op { kind: 5, shape: 0, x0: tx, y0: cy, x1: tx, y1: cy, r: tr, tile: 0, mat: 0, dir: 0, _p: [0; 2] });
         s
     }
     pub fn motor_end() -> Self { Scene::motor(0) }
-    pub fn motor_core() -> Self { Scene::motor(1) }
+    /// Core-burning grain seen end-on (2D cross-section): circular bore in an annular KNO3 / sorbitol / epoxy grain
+    /// inside a steel ring; the burning perimeter grows with the bore (progressive). A radial exit slot with
+    /// inhibited (phenolic) faces and a tungsten throat insert is the nozzle.
+    pub fn motor_core() -> Self {
+        let mut s = Scene::empty();
+        let (cx, cy) = (180, (H / 2) as i32);
+        let (r_bore, r_grain, r_liner, r_case) = (16.0f32, 33.0f32, 35.0f32, 41.0f32);
+        let half = 11; // gas passage half width (throat 22 cells)
+        for x in cx - 45..=cx + 45 {
+            for y in cy - 45..=cy + 45 {
+                let (dx, dy) = ((x - cx) as f32, (y - cy) as f32);
+                let r = (dx * dx + dy * dy).sqrt();
+                let slot = dx > 0.0 && dy.abs() < (half + 2) as f32;
+                if r < r_bore {
+                    continue;
+                }
+                if slot && dy.abs() < half as f32 {
+                    continue; // gas passage / nozzle
+                }
+                if slot && r <= r_case + 0.5 {
+                    // inhibitor on the slot faces, tungsten through the case
+                    s.put(x, y, MATTER, if r > r_grain { 85 } else { 87 }, 0);
+                } else if r < r_grain {
+                    let h = ((x * 73856093) ^ (y * 19349663)) as u32 % 100;
+                    s.cast(x, y, if h < 58 { 13 } else if h < 85 { 74 } else { 67 });
+                } else if r < r_liner {
+                    s.put(x, y, MATTER, 87, 0);
+                } else if r < r_case {
+                    s.put(x, y, WALL, STEEL, 0);
+                }
+            }
+        }
+        s.ops.push(Op { kind: 5, shape: 0, x0: cx - 14, y0: cy, x1: cx - 14, y1: cy, r: 3, tile: 0, mat: 0, dir: 0, _p: [0; 2] });
+        s
+    }
     pub fn motor_blocked() -> Self { Scene::motor(2) }
+
+    /// Burn-front race: six 2-cell loose strips (x 70..430) on steel shelves, each lit by an igniter at its left end.
+    /// Rows (top to bottom): charcoal, KNO3/sugar 65:35, black powder 75:15:10, gunpowder, flash powder (KClO4/Mg),
+    /// iron thermite. Strip y = 2 + 40 k + 20 (see `FRONT_ROWS`).
+    pub fn front_test() -> Self {
+        let mut s = Scene::empty();
+        for k in 0..6i32 {
+            let ys = 52 + 40 * k;
+            for x in 60..=440 {
+                s.put(x, ys, WALL, STEEL, 0);
+            }
+            s.put(69, ys - 1, IGNITER, 0, 0);
+            for q in 2..=4 {
+                s.put(69, ys - q, IGNITER, 0, 0);
+            }
+            for x in 70..=430 {
+                for y in ys - 4..ys {
+                    let mut hh = (x as u32).wrapping_mul(0x9E3779B1) ^ (y as u32).wrapping_mul(0x85EBCA77);
+                    hh ^= hh >> 15;
+                    hh = hh.wrapping_mul(0x2C1B3C6D);
+                    hh ^= hh >> 12;
+                    let h = (hh >> 4) % 100;
+                    let id = match k {
+                        0 => 11,
+                        1 => if h < 65 { 13 } else { 14 },
+                        2 => if h < 75 { 13 } else if h < 90 { 11 } else { 12 },
+                        3 => 57,
+                        4 => if h < 70 { 47 } else { 39 },
+                        _ => if h < 75 { 17 } else { 15 },
+                    };
+                    s.put(x, y, MATTER, id, 0);
+                }
+            }
+        }
+        s
+    }
     pub fn motor_loose() -> Self { Scene::motor(3) }
 
     fn checker(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, mats: &[u32]) {
@@ -685,7 +869,7 @@ impl Scene {
         // two pedestals and a 4-cell steel plate across them
         s.fill(170, 169, 190, fl, WALL, STEEL);
         s.fill(330, 169, 350, fl, WALL, STEEL);
-        s.fill(170, 166, 350, 168, WALL, STEEL);
+        s.fill(170, 167, 350, 168, WALL, STEEL); // 2-cell plate
         // thermite heap: rust + aluminium powder (3:1 by volume ~ stoichiometric by mass)
         for k in 0..16 {
             let w = 30 - k * 3 / 2;
@@ -693,10 +877,19 @@ impl Scene {
         }
         // magnesium ribbon from an igniter up onto the heap
         for k in 0..20 {
-            s.put(222 + k, 165 - 2 - k / 3, MATTER, 39, 0);
-            s.put(222 + k, 165 - 1 - k / 3, MATTER, 39, 0);
+            // dir bit 0 = pressed ribbon (immobile; a loose powder ribbon would fall off the igniter)
+            s.put(222 + k, 165 - 2 - k / 3, MATTER, 39, 1);
+            s.put(222 + k, 165 - 1 - k / 3, MATTER, 39, 1);
         }
         s.put(221, 164, IGNITER, 0, 0);
+        // starter pellet on the apex: potassium chlorate + magnesium (what hobbyists use to light thermite) with its own igniter
+        for x in 258..=262 {
+            for y in 147..=149 {
+                s.put(x, y, MATTER, if (x + y) % 2 == 0 { 69 } else { 39 }, 0);
+            }
+        }
+        s.put(257, 148, IGNITER, 0, 0);
+        s.put(263, 148, IGNITER, 0, 0);
         // sand bed below catches the iron
         s.fill(191, fl - 8, 329, fl, MATTER, 10);
         s
@@ -955,10 +1148,13 @@ pub const SHOWCASE: [(&str, &str, &str, fn() -> Scene); 12] = [
 ];
 
 /// Look-dev and cast-propellant test scenes (materials team): bench / SHOT_SCENE names.
-pub const MATERIAL_SCENES: [(&str, &str, &str, fn() -> Scene); 5] = [
-    ("material_board", "Material board", "Every powder, liquid and placeable solid in its own tray, labelled by element id", Scene::material_board),
+pub const MATERIAL_SCENES: [(&str, &str, &str, fn() -> Scene); 8] = [
+    ("mix_demo", "Mixing review", "Saltpeter + sugar side by side, stirred 65:35, and a three-component black powder blend", Scene::mix_demo),
+    ("material_board2", "Material board: engine and construction materials", "Liquid hydrogen, methane, propane, isopropanol, limestone, quicklime, baking soda, gypsum, concrete, soil, foam, boron, zirconium, carbon fibre, brass, bitumen, coolant and oil", Scene::material_board2),
+    ("material_board", "Material board", "Every powder, liquid and placeable solid in its own tray, labelled by element code", Scene::material_board),
     ("motor_end", "End-burning motor", "Cast KNO3/sugar end-burner in a steel tube with a nozzle: steady pressure for seconds", Scene::motor_end),
     ("motor_core", "Core-burning motor", "Cast grain with a central bore: burning surface grows, pressure rises progressively", Scene::motor_core),
     ("motor_cato", "Blocked nozzle (CATO)", "End-burner with the nozzle plugged: pressure climbs until the grain cracks or the case fails", Scene::motor_blocked),
+    ("front_test", "Burn-front race", "Six loose fuel strips on steel shelves lit at the left end: charcoal smoulders, sugar/KNO3 creeps steadily, black powder and flash powder flash along", Scene::front_test),
     ("motor_loose", "Loose powder in a tube", "The same tube filled with loose black-powder-style mix: it deflagrates through its pores", Scene::motor_loose),
 ];

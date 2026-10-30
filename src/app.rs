@@ -22,7 +22,7 @@ use theme::*;
 
 /// Simulated time units per real second at 1x speed (one "game second").
 const TPS: f32 = 32.0;
-const MAX_STEPS: u32 = 64;
+const MAX_STEPS: u32 = 192;
 /// Physical scale used for readouts: 1 cell = 1 cm, 1 time unit = 34 us, 1 m engine depth.
 const MS_PER_UNIT: f32 = 0.034;
 const MPS_PER_UNIT: f32 = 293.0;
@@ -81,8 +81,7 @@ fn parse_tool(s: &str) -> Option<Tool> {
 }
 
 fn data_dir() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(std::path::PathBuf::from(home).join("Library/Application Support/Ignis"))
+    crate::settings::data_dir()
 }
 
 
@@ -382,6 +381,7 @@ pub struct App {
     undo: Vec<Vec<u32>>,
     redo: Vec<Vec<u32>>,
     zoom: f32,
+    fit_req: bool,
     center: Vec2,
     stroke: Option<StrokeState>,
     hover: Option<(i32, i32)>,
@@ -395,6 +395,18 @@ pub struct App {
     frame: u32,
     sim_time: f32,
     rt_factor: f32,
+    /// Library: 0 category, 1 name, 2 density, 3 T*; descending flag; category filter chip.
+    lib_sort: u8,
+    lib_desc: bool,
+    lib_filter: Option<Cat>,
+    /// Plots: rolling window in ms (0 = whole run) and log10 pressure axis.
+    plot_win: f32,
+    plot_log_p: bool,
+    insp_tool: Option<Tool>,
+    /// Learned wall-clock cost of one solver step (ms), from frames that ran longer than vsync.
+    step_cost_ms: f32,
+    /// Smoothed simulated milliseconds advanced per wall-clock second (for the 1 : N readout).
+    sim_rate: f32,
     steps_last: u32,
     frame_ms: f32,
     hist: History,
@@ -413,6 +425,9 @@ pub struct App {
     show_grid: bool,
     show_legend: bool,
     show_about: bool,
+    show_templates: bool,
+    show_engine: bool,
+    engine_p: crate::engine::EngineParams,
     show_shortcuts: bool,
     show_experiments: bool,
     probes: probes::ProbeSet,
@@ -431,6 +446,7 @@ pub struct App {
     tutorial: crate::tutorial::Tutorial,
     tut_rects: std::collections::HashMap<String, Rect>,
     audio: Option<crate::audio::Audio>,
+    pub(crate) acoustics: Option<crate::audio::acoustics::Link>,
     audio_reset: bool,
     hist_raw_thrust: Vec2,
     pin_cell: bool,
@@ -474,8 +490,7 @@ impl egui_wgpu::CallbackTrait for Cb {
 }
 
 fn progress_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(std::path::PathBuf::from(home).join("Library/Application Support/Ignis/experiments.txt"))
+    crate::settings::data_dir().map(|d| d.join("experiments.txt"))
 }
 
 /// Mission order of the first release, used to read old space-separated progress files.
@@ -523,7 +538,20 @@ fn save_progress(v: &[u32]) {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let rs = cc.wgpu_render_state.as_ref().expect("wgpu backend");
-        let sim = GpuSim::new(&rs.device, rs.target_format);
+        let mut sim = GpuSim::new(&rs.device, rs.target_format);
+        let shot_mode = std::env::var("COMBUSTOR_SHOT").is_ok();
+        let acoustics = if shot_mode {
+            None
+        } else {
+            let link = {
+                let (u0, meta, wall) = sim.buffers();
+                crate::audio::acoustics::Link::new(&rs.device, u0, meta, wall, crate::gpu::W, crate::gpu::H)
+            };
+            { let l = link.clone(); sim.pre_hook = Some(Box::new(move |q, steps, reset| l.pre(q, steps, reset))); }
+            { let l = link.clone(); sim.step_hook = Some(Box::new(move |p, bg| l.step(p, bg))); }
+            { let l = link.clone(); sim.post_hook = Some(Box::new(move |d, e| l.post(d, e))); }
+            Some(link)
+        };
         rs.renderer.write().callback_resources.insert(sim);
         theme::setup_fonts(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
@@ -563,6 +591,7 @@ impl App {
             p_o2: 1.0,
             p_air: 2.0,
             fan_pow: 1.0,
+            acoustics,
             ign_on: true,
             gravity_on: true,
             pending_scene: None,
@@ -571,6 +600,7 @@ impl App {
             undo: vec![],
             redo: vec![],
             zoom: 1.0,
+            fit_req: false,
             center: Vec2::new(W as f32 / 2.0, H as f32 / 2.0),
             stroke: None,
             hover: None,
@@ -582,6 +612,14 @@ impl App {
             frame: 0,
             sim_time: 0.0,
             rt_factor: 1.0,
+            lib_sort: 0,
+            lib_desc: false,
+            lib_filter: None,
+            plot_win: 0.0,
+            plot_log_p: false,
+            insp_tool: None,
+            step_cost_ms: 0.4,
+            sim_rate: 0.0,
             steps_last: 0,
             frame_ms: 16.7,
             hist: History::default(),
@@ -600,6 +638,9 @@ impl App {
             show_grid: false,
             show_legend: true,
             show_about: false,
+            show_templates: false,
+            show_engine: false,
+            engine_p: crate::engine::EngineParams::otto(),
             show_shortcuts: false,
             show_experiments: false,
             probes: probes::ProbeSet::default(),
@@ -634,6 +675,7 @@ impl App {
     }
 
     fn load_scene(&mut self, sc: Scene) {
+        let sc_meta = sc.meta.clone();
         self.inlets = [false; 4];
         for &v in sc.meta.iter() {
             let t = v & 0xff;
@@ -648,6 +690,7 @@ impl App {
         self.tare = Vec2::ZERO;
         self.p_fuel = sc.inlet_p;
         self.p_o2 = sc.o2_p;
+        self.p_air = sc.p_air;
         self.pending_scene = Some(sc);
         self.sim_time = 0.0;
         self.undo.clear();
@@ -656,7 +699,31 @@ impl App {
         self.probes.reset_series();
         self.diag = probes::Diagnostics::default();
         self.audio_reset = true;
-        self.zoom = 1.0;
+        self.fit_view(&sc_meta);
+    }
+
+    /// Frame the occupied part of the layout (with room for a plume to the right) in the viewport.
+    fn fit_view(&mut self, meta: &[u32]) {
+        let (mut x0, mut x1, mut y0, mut y1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+        for (i, &v) in meta.iter().enumerate() {
+            if v & 0xff != 0 {
+                let (x, y) = ((i % W as usize) as i32, (i / W as usize) as i32);
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+        }
+        if x0 > x1 || x1 - x0 < 8 {
+            self.zoom = 1.0;
+            self.center = Vec2::new(W as f32 / 2.0, H as f32 / 2.0);
+            return;
+        }
+        let (bw, bh) = ((x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32);
+        let right = if self.engine_scene { 0.6 } else { 0.15 };
+        let (fw, fh) = (bw * (1.0 + 0.1 + right), bh * 1.35);
+        self.zoom = (W as f32 / fw).min(H as f32 / fh).clamp(1.0, 6.0);
+        self.center = Vec2::new(x0 as f32 + bw * (right - 0.1) / 2.0 + bw / 2.0, y0 as f32 + bh / 2.0);
     }
 
     fn start_sandbox_named(&mut self, name: &str, sc: Scene) {
@@ -772,7 +839,7 @@ impl App {
                 run.obj[k].progress = 1.0;
             }
         }
-        self.pending_scene = Some(Scene { meta: layout, inlet_p, o2_p, ops: prefill });
+        self.pending_scene = Some(Scene { meta: layout, inlet_p, o2_p, ops: prefill, p_air: self.p_air, engine: vec![] });
         self.sim_time = 0.0;
         self.paused = false;
         self.stroke = None;
@@ -1353,6 +1420,15 @@ impl App {
 
     fn shortcuts(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         use crate::settings::Action as A;
+        if ctx.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.shift && !i.modifiers.command) && !ctx.wants_keyboard_input() {
+            self.fit_req = true;
+        }
+        if self.fit_req {
+            self.fit_req = false;
+            if let Some(m) = self.current_meta(frame) {
+                self.fit_view(&m);
+            }
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.place.is_some() {
                 self.place = None;
@@ -1394,6 +1470,17 @@ impl App {
                             self.begin_test(frame);
                         }
                     }
+                }
+                A::SpeedSlower | A::SpeedFaster => {
+                    let presets = [0.1f32, 0.25, 0.5, 1.0, 2.0, 4.0];
+                    let i = presets.iter().position(|p| (*p - self.speed).abs() < 1e-3).unwrap_or(3);
+                    let j = if a == A::SpeedFaster { (i + 1).min(presets.len() - 1) } else { i.saturating_sub(1) };
+                    self.speed = presets[j];
+                    self.toast(&format!("Time scale {}x", self.speed));
+                }
+                A::Mute => {
+                    self.settings.muted = !self.settings.muted;
+                    self.toast(if self.settings.muted { "Sound off" } else { "Sound on" });
                 }
                 A::ToggleIgniters if self.run.is_none() => self.ign_on = !self.ign_on,
                 A::ResetZoom => self.zoom = 1.0,
@@ -1749,13 +1836,26 @@ impl App {
                 self.step_acc += self.speed * TPS * dt_real / DT;
                 let want = self.step_acc.floor();
                 self.step_acc -= want;
-                let cap = std::env::var("SHOT_MAXSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(MAX_STEPS);
-                // Frame-time controller: back off fast when a frame misses ~60 fps, creep up when there is
-                // headroom. Without this, slow frames ask for more steps, which makes the next frame slower.
-                if dt_real > 1.0 / 52.0 {
-                    self.dyn_cap = (self.dyn_cap * 0.8).max(2.0);
-                } else if self.last_capped {
-                    self.dyn_cap = (self.dyn_cap + 0.5).min(cap as f32);
+                let cap: u32 = std::env::var("SHOT_MAXSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| self.settings.graphics().max_steps_per_frame.min(MAX_STEPS));
+                // Frame-budget governor (target 60 fps): when a frame overruns, shrink the step cap in proportion to
+                // the overrun; when it is on time and the sim wanted more steps than the cap allowed, grow the cap
+                // geometrically. Slow frames never request more work (the shortfall is dropped, not banked).
+                let dt_ms = dt_real * 1000.0;
+                if self.steps_last > 2 {
+                    // A frame can never cost less than its GPU work, so a short frame bounds the step cost from
+                    // above; a clearly over-budget frame (GPU-bound) measures it.
+                    let sample = ((dt_ms - 2.0) / self.steps_last as f32).clamp(0.05, 3.0);
+                    if dt_ms > 21.0 {
+                        self.step_cost_ms += (sample - self.step_cost_ms) * 0.05;
+                    } else if sample < self.step_cost_ms {
+                        self.step_cost_ms += (sample - self.step_cost_ms) * 0.2;
+                    }
+                }
+                if dt_ms > 21.0 {
+                    let k = (17.0 / dt_ms).clamp(0.55, 0.95);
+                    self.dyn_cap = (self.dyn_cap * k).max(2.0);
+                } else if self.last_capped && dt_ms < 18.5 {
+                    self.dyn_cap = (self.dyn_cap * 1.08 + 0.5).min(cap as f32);
                 }
                 let budget = (self.dyn_cap as u32).clamp(1, cap);
                 self.last_capped = want as u32 > budget;
@@ -1768,8 +1868,17 @@ impl App {
                 s
             };
             steps_out = steps;
+            if !self.paused && dt_real > 0.0 {
+                let sim_ms = steps as f32 * DT * MS_PER_UNIT;
+                self.sim_rate += (sim_ms / dt_real - self.sim_rate) * 0.05;
+            } else if self.paused {
+                self.sim_rate = 0.0;
+            }
             self.sim_time += steps as f32 * DT;
             let sc = self.pending_scene.take();
+            if let Some(s) = sc.as_ref() {
+                crate::gpu::upload_engine(s.engine.clone());
+            }
             let mut all_ops = sc.as_ref().map(|s| s.ops.clone()).unwrap_or_default();
             all_ops.extend(ops.iter().copied());
             // queued fills: as many as fit in this frame's op buffer
@@ -1796,6 +1905,17 @@ impl App {
                     }
                     _ => ign = r.t < r.m().igniter_secs,
                 }
+            }
+            if let Some(l) = &self.acoustics {
+                l.set_frame(crate::audio::acoustics::Listener {
+                    pos: [cam[0] + cam[2] * 0.5, cam[1] + cam[3] * 0.5],
+                    cam,
+                    speed: self.speed,
+                    real_dt: dt_real,
+                    sim_time: self.sim_time,
+                    paused: self.paused,
+                    fan_pow: fan,
+                });
             }
             let input = FrameInput {
                 steps,
@@ -1961,8 +2081,10 @@ impl App {
             Some("experiments") => self.show_experiments = true,
             Some("shortcuts") => self.show_shortcuts = true,
             Some("about") => self.show_about = true,
+            Some("templates") => self.show_templates = true,
             Some("tour") => self.tutorial.start(0),
             Some("designer") => self.show_designer = true,
+            Some("engine") => self.show_engine = true,
             _ => {}
         }
         if let Some(v) = env("SHOT_PRESET") {
@@ -2034,6 +2156,7 @@ impl eframe::App for App {
         if self.dock_right {
             self.inspector_dock(ctx, frame, &stats, probe);
         }
+        self.designer_window(ctx);
         if self.dock_bottom {
             self.bottom_dock(ctx, frame, &stats);
         }
@@ -2091,7 +2214,6 @@ impl eframe::App for App {
 
         // floating windows
         self.windows(ctx, frame);
-        self.designer_window(ctx);
 
         // global time series for the Plots dock
         self.hist_timer += dt_real;

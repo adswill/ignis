@@ -654,7 +654,7 @@ impl App {
         let mut job = egui::text::LayoutJob::default();
         job.append("Compositions", 0.0, egui::TextFormat { font_id: head_font(), color: TEXT, ..Default::default() });
         job.append(&format!("   {}", items.len()), 0.0, egui::TextFormat { font_id: small_font(), color: FAINT, ..Default::default() });
-        egui::CollapsingHeader::new(job).id_salt(("libcat", "comp")).default_open(false).open(if q.is_empty() { None } else { Some(true) }).show(ui, |ui| {
+        egui::CollapsingHeader::new(job).id_salt(("libcat", "comp")).default_open(true).open(if q.is_empty() { None } else { Some(true) }).show(ui, |ui| {
             for (k, c, v) in items {
                 let w = ui.available_width();
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 20.0), Sense::click());
@@ -772,30 +772,44 @@ impl App {
     }
 
     // ------------------------------------------------------------------------------------- designer window
+    /// Docked, resizable side panel (never overlaps the inspector or the viewport header).
     pub(super) fn designer_window(&mut self, ctx: &egui::Context) {
         if !self.show_designer {
             return;
         }
-        let mut open = true;
-        let scr = ctx.screen_rect();
-        egui::Window::new("Propellant Designer")
-            .open(&mut open)
-            .collapsible(true)
-            .resizable(false)
-            .default_width(430.0)
-            .default_pos(Pos2::new(scr.right() - 760.0, 84.0))
-            .show(ctx, |ui| {
-                ui.set_width(430.0);
-                self.designer_ui(ui);
+        let mut close = false;
+        egui::SidePanel::right("designer").resizable(true).default_width(360.0).width_range(300.0..=520.0).frame(super::theme::panel_frame().stroke(Stroke::new(1.0_f32, BORDER))).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("PROPELLANT DESIGNER").size(10.0).color(FAINT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Close").on_hover_text("Close the designer (D)").clicked() {
+                        close = true;
+                    }
+                });
             });
-        self.show_designer = open;
+            ui.separator();
+            let pr = self.designer.predict();
+            egui::TopBottomPanel::bottom("designer_footer").frame(egui::Frame::NONE.fill(super::theme::PANEL).inner_margin(egui::Margin::symmetric(0, 6))).show_inside(ui, |ui| {
+                ui.separator();
+                self.designer_footer(ui, &pr);
+            });
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show_inside(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("dscroll").show(ui, |ui| {
+                    ui.add_space(4.0);
+                    self.designer_ui(ui, &pr);
+                });
+            });
+        });
+        if close {
+            self.show_designer = false;
+        }
     }
 
-    fn designer_ui(&mut self, ui: &mut egui::Ui) {
+    fn designer_ui(&mut self, ui: &mut egui::Ui, pr: &Prediction) {
         ui.horizontal(|ui| {
             ui.label(muted("Preset"));
             let cur = DESIGNER_PRESETS[self.designer.preset.min(DESIGNER_PRESETS.len() - 1)].0;
-            egui::ComboBox::from_id_salt("dpreset").width(290.0).selected_text(cur).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("dpreset").width(ui.available_width() - 8.0).selected_text(cur).show_ui(ui, |ui| {
                 for (k, (n, _, _)) in DESIGNER_PRESETS.iter().enumerate() {
                     if ui.selectable_label(self.designer.preset == k, *n).clicked() {
                         self.designer.load_preset(k);
@@ -811,7 +825,7 @@ impl App {
                 ui.label(muted(*label));
                 let avail = ingr_of(*role);
                 let cur = self.designer.sel[s].map(|i| INGREDIENTS[i].label).unwrap_or("none");
-                egui::ComboBox::from_id_salt(("dsel", s)).width(170.0).selected_text(cur).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt(("dsel", s)).width(150.0).selected_text(cur).show_ui(ui, |ui| {
                     if *optional && ui.selectable_label(self.designer.sel[s].is_none(), "none").clicked() {
                         self.designer.sel[s] = None;
                     }
@@ -843,7 +857,6 @@ impl App {
                 }
             }
         });
-        let pr = self.designer.predict();
         if !pr.missing.is_empty() {
             ui.label(RichText::new(format!("Not available in the materials library: {}", pr.missing.join(", "))).color(WARN).size(11.0));
         }
@@ -852,26 +865,25 @@ impl App {
         ui.add_space(8.0);
         ui.label(faint("PREDICTED PERFORMANCE  (oxygen-balance estimate)"));
         let u = self.units;
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(200.0);
+        {
+            {
                 sheet(ui, "dpred", |ui| {
                     kv(ui, "Flame temperature", u.ft(pr.t_flame));
                     kv(ui, "Burn-rate law", format!("r = {:.2}·p^{:.3}", pr.a, pr.n));
                     kv(ui, "  r at 1 atm", format!("{:.2} mm/s", pr.a * 0.101325f32.powf(pr.n)));
                     kv(ui, "  r at 3.5 MPa", format!("{:.2} mm/s", pr.a * 3.5f32.powf(pr.n)));
                     kv(ui, "  r at 7 MPa", format!("{:.2} mm/s", pr.a * 7.0f32.powf(pr.n)));
-                    kv(ui, "Ideal Isp (7 MPa → 1 atm)", format!("{:.0} s", pr.isp));
+                    kv(ui, "Ideal Isp (7 MPa to 1 atm)", format!("{:.0} s", pr.isp));
                     kv(ui, "Density", format!("{:.0} kg/m³", pr.rho * 1000.0));
                     kv(ui, "Equivalence φ", format!("{:.2}", pr.phi));
                     kv(ui, "Oxygen balance", format!("{:+.1} %", pr.ob));
                     kv(ui, "Product M", format!("{:.1} g/mol", pr.m));
                 });
-            });
+            }
             ui.add_space(6.0);
-            burn_chart(ui, Vec2::new(200.0, 160.0), pr.a, pr.n);
-        });
-        ui.add_space(6.0);
+            burn_chart(ui, Vec2::new(ui.available_width().min(420.0), 170.0), pr.a, pr.n);
+        }
+        ui.add_space(8.0);
         if !pr.notes.is_empty() {
             ui.label(faint("SAFETY AND QUALITY NOTES"));
             for (l, s) in &pr.notes {
@@ -879,12 +891,18 @@ impl App {
                     let (r, _) = ui.allocate_exact_size(Vec2::new(8.0, 14.0), Sense::hover());
                     ui.painter().rect_filled(Rect::from_center_size(r.center(), Vec2::new(3.0, 10.0)), CornerRadius::ZERO, level_color(*l));
                     ui.add(egui::Label::new(RichText::new(s).color(TEXT).size(11.0)).wrap());
+                    ui.add_space(2.0);
                 });
             }
         }
         ui.label(RichText::new("Estimates calibrated to published data (Nakka; Sutton & Biblarz). For the simulator only; not formulation guidance.").color(FAINT).size(10.0));
         ui.add_space(6.0);
-        ui.separator();
+        ui.label(faint("TEST MOTOR PREVIEW  (longitudinal section, thrust-time shape)"));
+        grain_preview(ui, self.designer.grain, self.designer.throat);
+        ui.add_space(8.0);
+    }
+
+    fn designer_footer(&mut self, ui: &mut egui::Ui, pr: &Prediction) {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.designer.cast, "Cast / pressed").on_hover_text("Cast grains burn only at the exposed surface. Loose blends burn through their pores (fast, explosive when confined).");
             let edit_ok = self.can_edit_layout();
@@ -964,7 +982,7 @@ fn burn_chart(ui: &mut egui::Ui, size: Vec2, a: f32, n: f32) {
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::ZERO, FIELD);
     p.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0_f32, BORDER), StrokeKind::Inside);
-    let plot = Rect::from_min_max(rect.min + Vec2::new(30.0, 18.0), rect.max - Vec2::new(8.0, 20.0));
+    let plot = Rect::from_min_max(rect.min + Vec2::new(40.0, 22.0), rect.max - Vec2::new(14.0, 34.0));
     let (lp0, lp1) = (-1.0f32, 1.0f32); // log10 MPa
     let (lr0, lr1) = (-0.5f32, 2.0f32); // log10 mm/s
     let tx = |lp: f32| plot.left() + (lp - lp0) / (lp1 - lp0) * plot.width();
@@ -979,8 +997,8 @@ fn burn_chart(ui: &mut egui::Ui, size: Vec2, a: f32, n: f32) {
         p.hline(plot.x_range(), y, Stroke::new(1.0_f32, BORDER));
         p.text(Pos2::new(plot.left() - 3.0, y), Align2::RIGHT_CENTER, format!("{}", 10f32.powf(d)), FontId::monospace(9.5), FAINT);
     }
-    p.text(rect.left_top() + Vec2::new(6.0, 4.0), Align2::LEFT_TOP, "burn rate  mm/s", small_font(), MUTED);
-    p.text(Pos2::new(plot.right(), rect.bottom() - 2.0), Align2::RIGHT_BOTTOM, "p  MPa", small_font(), FAINT);
+    p.text(rect.left_top() + Vec2::new(6.0, 4.0), Align2::LEFT_TOP, "burn rate r, mm/s (log)", small_font(), MUTED);
+    p.text(Pos2::new(plot.center().x, rect.bottom() - 3.0), Align2::CENTER_BOTTOM, "chamber pressure p, MPa (log)", small_font(), FAINT);
     let pts: Vec<Pos2> = (0..=40)
         .map(|k| {
             let lp = lp0 + (lp1 - lp0) * k as f32 / 40.0;
@@ -989,4 +1007,52 @@ fn burn_chart(ui: &mut egui::Ui, size: Vec2, a: f32, n: f32) {
         })
         .collect();
     p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, ACCENT)));
+}
+
+/// Longitudinal section of the test motor plus the qualitative thrust-time shape of the chosen grain.
+fn grain_preview(ui: &mut egui::Ui, grain: usize, throat: i32) {
+    let w = ui.available_width().min(420.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 84.0), Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, CornerRadius::ZERO, FIELD);
+    p.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0_f32, BORDER), StrokeKind::Inside);
+    let half = w * 0.5;
+    // section (left half)
+    let sec = Rect::from_min_max(rect.min + Vec2::new(8.0, 10.0), Pos2::new(rect.left() + half - 8.0, rect.bottom() - 18.0));
+    let case = Rect::from_min_max(sec.min, Pos2::new(sec.right() - sec.width() * 0.2, sec.bottom()));
+    p.rect_filled(case, CornerRadius::ZERO, Color32::from_rgb(70, 74, 82));
+    let inner = case.shrink(3.0);
+    let gx1 = if grain == 0 { inner.left() + inner.width() * 0.62 } else { inner.right() - inner.width() * 0.12 };
+    let g = Rect::from_min_max(inner.min, Pos2::new(gx1, inner.max.y));
+    p.rect_filled(inner, CornerRadius::ZERO, Color32::from_rgb(24, 25, 28));
+    p.rect_filled(g, CornerRadius::ZERO, Color32::from_rgb(190, 150, 90));
+    if grain == 1 {
+        let c = Rect::from_min_max(Pos2::new(g.left() + g.width() * 0.08, inner.center().y - inner.height() * 0.12), Pos2::new(g.right(), inner.center().y + inner.height() * 0.12));
+        p.rect_filled(c, CornerRadius::ZERO, Color32::from_rgb(24, 25, 28));
+    }
+    // nozzle throat
+    let th = (throat as f32 / 24.0 * sec.height() * 0.5).clamp(2.0, sec.height() * 0.5);
+    let nx = case.right();
+    p.add(egui::Shape::convex_polygon(vec![Pos2::new(nx, sec.center().y - th), Pos2::new(sec.right(), sec.top() + 2.0), Pos2::new(sec.right(), sec.bottom() - 2.0), Pos2::new(nx, sec.center().y + th)], Color32::from_rgb(24, 25, 28), Stroke::new(1.5_f32, Color32::from_rgb(70, 74, 82))));
+    p.text(Pos2::new(sec.left(), rect.bottom() - 3.0), Align2::LEFT_BOTTOM, if grain == 0 { "end-burner: burns from the aft face" } else { "core-burner: burns the bore surface" }, small_font(), MUTED);
+    // thrust-time shape (right half)
+    let plot = Rect::from_min_max(Pos2::new(rect.left() + half + 14.0, rect.top() + 12.0), Pos2::new(rect.right() - 10.0, rect.bottom() - 18.0));
+    p.rect_stroke(plot, CornerRadius::ZERO, Stroke::new(1.0_f32, BORDER), StrokeKind::Outside);
+    let f = |t: f32| -> f32 {
+        if grain == 0 {
+            0.35
+        } else {
+            0.35 + 0.5 * t
+        }
+    };
+    let pts: Vec<Pos2> = (0..=24)
+        .map(|k| {
+            let t = k as f32 / 24.0;
+            let fall = if t > 0.9 { (1.0 - (t - 0.9) / 0.1).max(0.0) } else { 1.0 };
+            let rise = (t / 0.04).min(1.0);
+            Pos2::new(plot.left() + t * plot.width(), plot.bottom() - f(t) * fall * rise * plot.height() / 0.9 * 0.95)
+        })
+        .collect();
+    p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, ACCENT)));
+    p.text(Pos2::new(plot.center().x, rect.bottom() - 3.0), Align2::CENTER_BOTTOM, "thrust vs time (qualitative)", small_font(), MUTED);
 }

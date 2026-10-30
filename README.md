@@ -3,12 +3,12 @@
 </p>
 
 <p align="center">
-  <b>A research-grade 2D combustion and chemistry simulator for macOS.</b><br>
+  <b>A research-grade 2D combustion and chemistry simulator for macOS and Windows.</b><br>
   Compressible reacting gas dynamics on the GPU, powders, liquids and engineering materials, in one interactive workspace.
 </p>
 
 <p align="center">
-  <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-lightgrey">
+  <img alt="platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey">
   <img alt="licence" src="https://img.shields.io/badge/licence-PolyForm%20Noncommercial%201.0.0-blue">
   <img alt="rust" src="https://img.shields.io/badge/built%20with-Rust-orange">
   <img alt="metal" src="https://img.shields.io/badge/GPU-wgpu%20%2F%20Metal-informational">
@@ -31,6 +31,8 @@ You can light a methane flare and watch buoyant diffusion flames form, mix saltp
 
 Get the latest build from the [Releases page](https://github.com/adswill/ignis/releases).
 
+**macOS (Apple Silicon)**
+
 1. Download `Ignis-*-macOS-arm64.dmg` (or the `.zip`).
 2. Drag **Ignis** into `Applications`.
 3. The app is not signed with an Apple Developer ID, so macOS will warn on first launch. Right-click the app, choose **Open**, then confirm. Alternatively run:
@@ -39,7 +41,14 @@ Get the latest build from the [Releases page](https://github.com/adswill/ignis/r
 xattr -dr com.apple.quarantine /Applications/Ignis.app
 ```
 
-Requirements: a Mac with Apple Silicon (M1 or newer) and a recent macOS. A modern GPU is required; the simulation runs entirely on it.
+**Windows (x86-64)**
+
+1. Download `Ignis-*-windows-x64.zip` and extract it.
+2. Run `Ignis.exe`. Windows SmartScreen may warn because the app is unsigned: choose **More info**, then **Run anyway**.
+
+The Windows build is new and has been cross-compiled but not yet tested on many machines; please report problems. It needs a GPU with DirectX 12 or Vulkan support.
+
+Requirements: Apple Silicon Mac with a recent macOS, or a 64-bit Windows PC. A modern GPU is required; the simulation runs entirely on it.
 
 ## Screenshots
 
@@ -51,6 +60,12 @@ Requirements: a Mac with Apple Silicon (M1 or newer) and a recent macOS. A moder
 | A buoyant methane flare with soot and smoke. | The pressure field of a rocket: shock cells in the exhaust. |
 
 ## Features
+
+**New in 0.2.0**
+- Piston engines: crank-driven pistons, cam-timed valves, spark plugs and fuel injectors. Presets for single, twin and four-cylinder petrol engines, diesel, two-stroke, turbo, Atkinson and an opposed-piston engine, plus an Engine designer window to build your own.
+- 18 new materials: liquid hydrogen, methane and propane, isopropanol, limestone, quicklime, baking soda, gypsum, concrete, soil, polystyrene foam, boron, zirconium, carbon fibre, brass, bitumen, coolant and engine oil.
+- New demos: propane tanks in a fire, cryogenic fuels, metal powder flash, fire barriers and more.
+- Windows build.
 
 **Gas dynamics**
 - Compressible multi-species Euler solver on the GPU: MUSCL reconstruction, HLLC Riemann solver, two-stage Runge-Kutta, on a 512 by 288 grid.
@@ -154,7 +169,7 @@ tools/release_macos.sh
 
 ## Known limitations
 
-- Apple Silicon macOS only; no Windows or Linux build yet.
+- macOS (Apple Silicon) and Windows (x86-64) only; no Linux build yet. The Windows build is untested on most hardware.
 - The gas model has one generic fuel species; hydrogen, kerosene and propane as distinct gases are planned.
 - The simulation is two-dimensional and the chemistry is simplified (single-step).
 - Performance depends on the GPU and the scene; heavy scenes run slower than real time.

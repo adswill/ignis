@@ -13,7 +13,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-OUT="${QA_OUT:-${TMPDIR:-/tmp}/ignis-qa}"
+OUT="${QA_OUT:-/tmp/ignis-qa}"
 mkdir -p "$OUT"
 BUILD_LOG="$OUT/build.log"
 TRIES="${QA_BUILD_TRIES:-10}"

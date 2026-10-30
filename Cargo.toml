@@ -1,15 +1,7 @@
 [package]
 name = "ignis"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Research-grade 2D combustion and chemistry simulator for macOS: GPU compressible gas dynamics, reacting flow, powders, liquids and heat-damaged walls."
-authors = ["adswill"]
-repository = "https://github.com/adswill/ignis"
-homepage = "https://github.com/adswill/ignis"
-readme = "README.md"
-license-file = "LICENSE"
-keywords = ["combustion", "simulation", "cfd", "wgpu", "physics"]
-categories = ["simulation", "science", "graphics"]
 
 [dependencies]
 eframe = { version = "0.31", default-features = false, features = ["wgpu", "default_fonts"] }

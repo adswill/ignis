@@ -95,7 +95,7 @@ fn ac_cid(x: i32, y: i32) -> u32 {
     return u32(cy) * A.w + u32(cx);
 }
 fn ac_tile(i: u32) -> u32 { return META[i] & 0xFFu; }
-fn ac_solid(t: u32) -> bool { return t == 1u || t == 6u || t == 8u; }
+fn ac_solid(t: u32) -> bool { return t == 1u || t == 6u || t == 8u || t == 9u || t == 10u || t == 12u || t == 13u; }
 fn ac_ld(i: u32) -> G { return G(U0[2u * i], U0[2u * i + 1u]); }
 fn ac_rho(s: G) -> f32 { return max(s.a.x + s.a.y + s.a.z + s.a.w, RHO_MIN); }
 fn ac_gm1(s: G) -> f32 { return dot(s.a, RS) / max(dot(s.a, CV), 1e-6); }

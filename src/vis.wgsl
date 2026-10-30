@@ -33,6 +33,28 @@ fn heat_ramp(tv: f32) -> vec3<f32> {
     return mix(st[k], st[k + 1u], f - f32(k));
 }
 
+
+// perceptual "inferno" colormap (polynomial fit), t in 0..1, display-space colour
+fn inferno(t0: f32) -> vec3<f32> {
+    let t = clamp(t0, 0.0, 1.0);
+    let c0 = vec3<f32>(0.0002189403691192265, 0.001651004631001012, -0.01948089843709184);
+    let c1 = vec3<f32>(0.1065134194856116, 0.5639564367884091, 3.932712388889277);
+    let c2 = vec3<f32>(11.60249308247187, -3.972853965665698, -15.9423941062914);
+    let c3 = vec3<f32>(-41.70399613139459, 17.43639888205313, 44.35414519872813);
+    let c4 = vec3<f32>(77.162935699427, -33.40235894210092, -81.80730925738993);
+    let c5 = vec3<f32>(-71.31942824499214, 32.62606426397723, 73.20951985803202);
+    let c6 = vec3<f32>(25.13112622477341, -12.24266895238567, -23.07032500287172);
+    return clamp(c0 + t * (c1 + t * (c2 + t * (c3 + t * (c4 + t * (c5 + t * c6))))), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Pressure view colour map: log2(p / 1 atm) on a diverging scale. Below ambient: dark -> blue (down to 0.25 atm);
+// ambient: near-black; above: inferno up to 2^4.2 = 18 atm. Legend in render.wgsl uses the same function.
+fn pres_col(p: f32) -> vec3<f32> {
+    let d = log2(max(p, 0.05));
+    if (d < 0.0) { return mix(vec3<f32>(0.02, 0.02, 0.03), vec3<f32>(0.15, 0.45, 1.0), clamp(-d / 2.0, 0.0, 1.0)); }
+    return inferno(d / 4.2) + vec3<f32>(0.02, 0.02, 0.03) * (1.0 - clamp(d, 0.0, 1.0));
+}
+
 fn hsv(h: f32, s: f32, v: f32) -> vec3<f32> {
     let k = vec3<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0);
     let p = abs(fract(vec3<f32>(h) + k) * 6.0 - 3.0);
@@ -220,6 +242,28 @@ fn colorize(@builtin(global_invocation_id) g: vec3<u32>) {
         } else {
             b = alb * 0.55;
         }
+    } else if (tl == 9u || tl == 10u || tl == 12u || tl == 13u) {
+        // engine parts: piston (ring grooves travel with the crown), closed valve, spark plug, idle injector
+        var c = vec3<f32>(0.55, 0.57, 0.62);
+        let eid = min((META[i] >> 8u) & 0xFFu, 15u);
+        if (tl == 9u) {
+            let rel = abs(bitcast<i32>(AUX[ENG_PIST + min(eid, 7u) * 8u + 6u]) - i32(g.x));
+            c = vec3<f32>(0.66, 0.68, 0.72);
+            if (rel == 1 || rel == 3) { c = vec3<f32>(0.20, 0.21, 0.24); }
+            if (rel == 0) { c = vec3<f32>(0.82, 0.84, 0.88); }
+        } else if (tl == 10u) {
+            c = vec3<f32>(0.30, 0.31, 0.36);
+        } else if (tl == 12u) {
+            c = vec3<f32>(0.90, 0.88, 0.80);
+            if (spark_active(eid)) {
+                c = vec3<f32>(0.90, 0.95, 1.0);
+                if (v == 0u) { gl = vec3<f32>(1.8, 2.1, 6.0); }
+            }
+        } else {
+            c = vec3<f32>(0.30, 0.42, 0.28);
+        }
+        b = select(c, to_lin(c), v == 0u);
+        op = 1.0;
     } else if (tl == 6u) {
         if (P.ign_on != 0u) {
             let fl = 0.8 + 0.2 * sin(P.time * 6.0);
@@ -240,16 +284,21 @@ fn colorize(@builtin(global_invocation_id) g: vec3<u32>) {
         let p = pres(s);
         let soot = max(s.b.w, 0.0);
         if (v == 1u) {
-            let q = (p - 1.0) / 1.5;
-            b = vec3<f32>(clamp(q, 0.0, 1.0), clamp(q * 0.28, 0.0, 1.0), clamp(-q * 1.2, 0.0, 1.0));
-            if (q > 1.0) { b.y = min(q - 1.0, 1.0); b.z = clamp(q - 1.5, 0.0, 1.0); }
+            b = pres_col(p);
+            // schlieren overlay: |grad p| outlines shocks, expansion fans and Mach discs
+            let pxm = pres(ld0(cid(i32(g.x) - 1, i32(g.y))));
+            let pxp = pres(ld0(cid(i32(g.x) + 1, i32(g.y))));
+            let pym = pres(ld0(cid(i32(g.x), i32(g.y) - 1)));
+            let pyp = pres(ld0(cid(i32(g.x), i32(g.y) + 1)));
+            let gp = length(vec2<f32>(pxp - pxm, pyp - pym)) / max(p, 0.2);
+            b = mix(b, vec3<f32>(0.85, 0.92, 1.0), 0.55 * smoothstep(0.10, 0.6, gp));
         } else if (v == 2u) {
             b = heat_ramp((tt - 0.3) / 9.7);
         } else if (v == 3u) {
             let vx = s.b.x / rho;
             let vy = s.b.y / rho;
             let sp = sqrt(vx * vx + vy * vy);
-            b = hsv(atan2(vy, vx) / 6.2831853, 0.85, min(sp / 2.5, 1.0));
+            b = inferno(sp / 5.0);
         } else if (v == 4u) {
             // dim composition field under the particles (same palette as particles.wgsl view 4)
             let molt = max(dot(max(s.a, vec4<f32>(0.0)), RS), 1e-6);
@@ -327,6 +376,14 @@ fn colorize(@builtin(global_invocation_id) g: vec3<u32>) {
             let band = min(rp / 0.15 * tr8, 12.0) * core * (1.0 - 0.7 * soot_g);
             let bcol = mix(vec3<f32>(0.30, 0.20, 1.0), vec3<f32>(1.0, 0.42, 0.80), smoothstep(2450.0, 3100.0, tk));
             gl += mix(bcol, vec3<f32>(1.0, 0.82, 0.92), smoothstep(2850.0, 3400.0, tk)) * band * 0.55;
+            // (c) supersonic jet column: translucent blue-violet core from H2O/CO2/OH band emission at any temperature
+            // above ~1100 K, brighter where re-compression raises p (shock diamonds / Mach discs), so the collimated
+            // plume stays visible well past the nozzle after the gas has expanded and cooled
+            let sup = smoothstep(0.7, 2.0, mach) * smoothstep(0.015, 0.10, rp) * (1.0 - soot_g);
+            let tjet = smoothstep(600.0, 2000.0, tk);
+            let diam = 1.0 + 3.5 * smoothstep(1.05, 2.2, p);
+            let jcol = mix(vec3<f32>(0.35, 0.28, 1.0), vec3<f32>(1.0, 0.55, 0.95), smoothstep(1.0, 2.6, p));
+            gl += jcol * sup * tjet * diam * (0.35 + 0.2 * min(mach, 4.0)) * min(rp * 6.0, 2.0);
         }
     }
     gl = select(vec3<f32>(0.0), gl, gl == gl);
